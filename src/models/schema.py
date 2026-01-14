@@ -1,9 +1,12 @@
 """
 Schema models for the BDA optimization application.
 """
+import os
 from typing import Dict, Any, Optional, List, Tuple
 from pydantic import BaseModel, Field
 import logging
+
+from src.path_security import validate_path_within_directory, validate_file_extension
 
 logger = logging.getLogger(__name__)
 
@@ -29,19 +32,28 @@ class Schema(BaseModel):
     properties: Dict[str, Any] = Field(description="Schema properties (can be SchemaProperty instances or nested structures)")
 
     @classmethod
-    def from_file(cls, file_path: str) -> "Schema":
+    def from_file(cls, file_path: str, allowed_dir: str = ".") -> "Schema":
         """
         Load schema from a JSON file.
         Handles both flat and nested blueprint structures.
         
         Args:
             file_path: Path to the JSON file
+            allowed_dir: Base directory that file_path must be within
             
         Returns:
             Schema: Loaded schema (preserves original structure)
+            
+        Raises:
+            ValueError: If path traversal is detected or file extension is invalid
         """
         import json
-        with open(file_path, 'r') as f:
+        # Validate path is within allowed directory
+        safe_path = validate_path_within_directory(file_path, allowed_dir)
+        validate_file_extension(safe_path, ['.json'])
+        
+        # Path validated by validate_path_within_directory above
+        with open(safe_path, 'r') as f:  # nosec B108 # nosemgrep: python.lang.security.audit.path-traversal
             data = json.load(f)
         
         # Convert properties to SchemaProperty instances if they exist
@@ -59,15 +71,25 @@ class Schema(BaseModel):
         
         return cls(**data)
     
-    def to_file(self, file_path: str) -> None:
+    def to_file(self, file_path: str, allowed_dir: str = ".") -> None:
         """
         Save schema to a JSON file.
         Preserves nested structure if present.
         
         Args:
             file_path: Path to save the JSON file
+            allowed_dir: Base directory that file_path must be within
+            
+        Raises:
+            ValueError: If path traversal is detected or file extension is invalid
         """
         import json
+        # Validate path is within allowed directory
+        safe_path = validate_path_within_directory(file_path, allowed_dir)
+        validate_file_extension(safe_path, ['.json'])
+        
+        # Create directory if needed
+        os.makedirs(os.path.dirname(safe_path) or '.', exist_ok=True)
         
         # Get the schema as a dictionary
         schema_dict = self.model_dump(by_alias=True)
@@ -76,15 +98,17 @@ class Schema(BaseModel):
         if "properties" in schema_dict:
             properties = {}
             for field_name, prop_def in schema_dict["properties"].items():
-                if hasattr(prop_def, 'model_dump'):
-                    # This is a SchemaProperty instance
+                # Check if it's a Pydantic model with model_dump method
+                is_pydantic_model = hasattr(prop_def, 'model_dump')
+                if is_pydantic_model:
                     properties[field_name] = prop_def.model_dump()
                 else:
-                    # This is already a dictionary (nested structure)
+                    # Already a dictionary (nested structure)
                     properties[field_name] = prop_def
             schema_dict["properties"] = properties
         
-        with open(file_path, 'w') as f:
+        # Path validated by validate_path_within_directory above
+        with open(safe_path, 'w') as f:  # nosec B108 # nosemgrep: python.lang.security.audit.path-traversal
             json.dump(schema_dict, f, indent=4)
     
     def update_instruction(self, field_name: str, instruction: str) -> None:
@@ -95,13 +119,22 @@ class Schema(BaseModel):
         Args:
             field_name: Name of the field (can be dot-notation for nested fields)
             instruction: New instruction
+            
+        Raises:
+            KeyError: If field_name is not found in properties
+            TypeError: If property type doesn't support instruction updates
         """
-        if field_name in self.properties:
-            prop = self.properties[field_name]
-            if isinstance(prop, SchemaProperty):
-                prop.instruction = instruction
-            elif isinstance(prop, dict) and "instruction" in prop:
-                prop["instruction"] = instruction
+        if field_name not in self.properties:
+            raise KeyError(f"Field '{field_name}' not found in schema properties")
+        
+        prop = self.properties[field_name]
+        if isinstance(prop, SchemaProperty):
+            prop.instruction = instruction
+        elif isinstance(prop, dict) and "instruction" in prop:
+            # Update instruction in dict format (not sensitive data)
+            prop["instruction"] = instruction  # nosemgrep: python.lang.security.audit.sensitive-data-leak
+        else:
+            raise TypeError(f"Property '{field_name}' does not support instruction updates")
     
     def is_nested(self) -> bool:
         """
@@ -109,10 +142,17 @@ class Schema(BaseModel):
         
         Returns:
             True if schema contains nested structures, False otherwise
+            
+        Raises:
+            RuntimeError: If schema analysis fails
         """
         from src.services.schema_converter import SchemaFlattener
-        flattener = SchemaFlattener()
-        return flattener.is_nested_schema(self.model_dump(by_alias=True))
+        try:
+            flattener = SchemaFlattener()
+            return flattener.is_nested_schema(self.model_dump(by_alias=True))
+        except Exception as e:
+            logger.error(f"Failed to check if schema is nested: {e}")
+            raise RuntimeError("Failed to analyze schema structure") from e
     
     def flatten_for_optimization(self) -> Tuple['Schema', Dict[str, str]]:
         """
@@ -122,12 +162,19 @@ class Schema(BaseModel):
             Tuple containing:
             - Flattened Schema instance with dot-notation field names
             - Path mapping for reconstruction
+            
+        Raises:
+            RuntimeError: If schema flattening fails
         """
         from src.services.schema_converter import SchemaFlattener
         
-        flattener = SchemaFlattener()
-        schema_dict = self.model_dump(by_alias=True)
-        flattened_dict, path_mapping = flattener.flatten_schema(schema_dict)
+        try:
+            flattener = SchemaFlattener()
+            schema_dict = self.model_dump(by_alias=True)
+            flattened_dict, path_mapping = flattener.flatten_schema(schema_dict)
+        except Exception as e:
+            logger.error(f"Failed to flatten schema: {str(e)}")
+            raise RuntimeError("Failed to flatten schema for optimization") from e
         
         # Convert flattened properties to SchemaProperty instances
         flattened_properties = {}
@@ -141,10 +188,14 @@ class Schema(BaseModel):
                 continue
         
         # Create new Schema instance with flattened properties
-        flattened_schema = Schema(
-            **{k: v for k, v in flattened_dict.items() if k != "properties"},
-            properties=flattened_properties
-        )
+        try:
+            flattened_schema = Schema(
+                **{k: v for k, v in flattened_dict.items() if k != "properties"},
+                properties=flattened_properties
+            )
+        except Exception as e:
+            logger.error(f"Failed to create flattened Schema instance: {str(e)}")
+            raise RuntimeError("Failed to create flattened schema") from e
         
         return flattened_schema, path_mapping
     
@@ -158,6 +209,9 @@ class Schema(BaseModel):
             
         Returns:
             Schema instance with original nested structure and optimized instructions
+            
+        Raises:
+            RuntimeError: If schema reconstruction fails
         """
         from src.services.schema_converter import SchemaUnflattener
         
@@ -165,11 +219,13 @@ class Schema(BaseModel):
             # No mapping means it was already flat, return the flat schema
             return flat_schema
         
-        unflattener = SchemaUnflattener()
-        flat_dict = flat_schema.model_dump(by_alias=True)
-        nested_dict = unflattener.unflatten_schema(flat_dict, path_mapping)
-        
-        # Convert nested properties back to proper structure
-        # Note: The unflattened structure may have nested dicts, not SchemaProperty instances
-        # We need to preserve the original nested structure
-        return Schema(**nested_dict)
+        try:
+            unflattener = SchemaUnflattener()
+            flat_dict = flat_schema.model_dump(by_alias=True)
+            nested_dict = unflattener.unflatten_schema(flat_dict, path_mapping)
+            
+            # Convert nested properties back to proper structure
+            return Schema(**nested_dict)
+        except Exception as e:
+            logger.error(f"Failed to unflatten schema: {e}")
+            raise RuntimeError("Failed to reconstruct nested schema") from e

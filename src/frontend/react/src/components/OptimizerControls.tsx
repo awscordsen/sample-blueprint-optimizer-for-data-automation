@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import {
   Container,
   Header,
@@ -14,27 +14,42 @@ export default function OptimizerControls() {
   const { state, dispatch } = useAppContext()
   const [loading, setLoading] = useState(false)
   const [validationErrors, setValidationErrors] = useState<string[]>([])
+  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const validateOptimizerRequirements = () => {
-    const errors = []
-    if (!state.config.project_arn.trim()) errors.push('Project ARN')
-    if (!state.config.blueprint_id.trim()) errors.push('Blueprint ID')
-    if (!state.config.project_stage.trim()) errors.push('Project Stage')
-    if (!state.config.input_document.trim()) errors.push('Input Document')
-    if (!state.config.bda_s3_output_location.trim()) errors.push('BDA S3 Output Location')
-    
-    if (state.config.inputs.length === 0) {
-      errors.push('At least one instruction')
-    } else {
-      const invalidInstructions = state.config.inputs.filter(
-        (input, index) => !input.field_name.trim() || !input.instruction.trim() || !input.expected_output.trim()
-      )
-      if (invalidInstructions.length > 0) {
-        errors.push('All instructions must have field name, instruction, and expected output filled')
+  // Cleanup polling interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
       }
     }
-    
-    return errors
+  }, [])
+
+  const validateOptimizerRequirements = () => {
+    try {
+      const errors: string[] = []
+      if (!state?.config?.project_arn?.trim()) errors.push('Project ARN')
+      if (!state?.config?.blueprint_id?.trim()) errors.push('Blueprint ID')
+      if (!state?.config?.project_stage?.trim()) errors.push('Project Stage')
+      if (!state?.config?.input_document?.trim()) errors.push('Input Document')
+      if (!state?.config?.bda_s3_output_location?.trim()) errors.push('BDA S3 Output Location')
+      
+      if (!state?.config?.inputs || state.config.inputs.length === 0) {
+        errors.push('At least one instruction')
+      } else {
+        const invalidInstructions = state.config.inputs.filter(
+          (input) => !input?.field_name?.trim() || !input?.instruction?.trim() || !input?.expected_output?.trim()
+        )
+        if (invalidInstructions.length > 0) {
+          errors.push('All instructions must have field name, instruction, and expected output filled')
+        }
+      }
+      
+      return errors
+    } catch (error) {
+      console.error('Error validating optimizer requirements:', error)
+      return ['Validation error occurred']
+    }
   }
 
   const runOptimizer = async () => {
@@ -56,6 +71,8 @@ export default function OptimizerControls() {
 
     setLoading(true)
     try {
+      // Update config first to ensure backend has latest configuration
+      await apiService.updateConfig(state.config)
       const response = await apiService.runOptimizer(state.settings)
       dispatch({ type: 'SET_STATUS', payload: { status: 'running' } })
       if (response.data.log_file) {
@@ -85,17 +102,28 @@ export default function OptimizerControls() {
   }
 
   const startStatusPolling = () => {
-    const interval = setInterval(async () => {
+    // Clear any existing interval
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current)
+    }
+    
+    pollingIntervalRef.current = setInterval(async () => {
       try {
         const response = await apiService.getOptimizerStatus()
         dispatch({ type: 'SET_STATUS', payload: response.data })
         
         if (response.data.status === 'completed' || response.data.status === 'not_running') {
-          clearInterval(interval)
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current)
+            pollingIntervalRef.current = null
+          }
         }
       } catch (error) {
         console.error('Error checking status:', error)
-        clearInterval(interval)
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current)
+          pollingIntervalRef.current = null
+        }
       }
     }, 2000) // Check every 2 seconds
   }

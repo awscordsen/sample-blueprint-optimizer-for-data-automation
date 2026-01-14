@@ -20,12 +20,14 @@ fi
 cleanup() {
     echo "Shutting down development servers..."
     if [[ -n "$FASTAPI_PID" ]]; then
-        kill $FASTAPI_PID 2>/dev/null
-        echo "FastAPI server stopped"
+        if kill "$FASTAPI_PID" 2>/dev/null; then
+            echo "FastAPI server stopped"
+        fi
     fi
     if [[ -n "$REACT_PID" ]]; then
-        kill $REACT_PID 2>/dev/null
-        echo "React server stopped"
+        if kill "$REACT_PID" 2>/dev/null; then
+            echo "React server stopped"
+        fi
     fi
     exit 0
 }
@@ -48,12 +50,17 @@ fi
 
 # Start FastAPI backend with restricted working directory
 echo "Starting FastAPI backend on port 8000..."
-cd "$PROJECT_ROOT"
-python -m uvicorn src.frontend.app:app --host 0.0.0.0 --port 8000 --reload &
+cd "$PROJECT_ROOT" || { echo "Error: Failed to change to project root"; exit 1; }
+# Use PYTHONUNBUFFERED to ensure print statements appear immediately
+PYTHONUNBUFFERED=1 python -m uvicorn src.frontend.app:app --host 0.0.0.0 --port 8000 --reload --log-level debug &
 FASTAPI_PID=$!
 
-# Wait a moment for FastAPI to start
+# Wait and verify FastAPI started successfully
 sleep 3
+if ! kill -0 $FASTAPI_PID 2>/dev/null; then
+    echo "Error: FastAPI server failed to start"
+    exit 1
+fi
 
 # Validate React environment
 REACT_DIR="$PROJECT_ROOT/src/frontend/react"
@@ -72,8 +79,8 @@ if ! command -v npm &> /dev/null; then
     exit 1
 fi
 
-# Install dependencies if node_modules doesn't exist
-if [[ ! -d "node_modules" ]]; then
+# Install dependencies if node_modules doesn't exist or vite is missing
+if [[ ! -d "node_modules" ]] || [[ ! -f "node_modules/.bin/vite" ]]; then
     echo "Installing React dependencies..."
     npm install
 fi

@@ -2,7 +2,7 @@ import axios from 'axios'
 import { OptimizerConfig, OptimizerSettings, OptimizerStatus } from '../types'
 
 const api = axios.create({
-  baseURL: 'http://localhost:8000',
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
   timeout: 5000,
 })
 
@@ -23,7 +23,7 @@ export const apiService = {
     api.post('/fetch-blueprint', data),
 
   viewLog: (logFile: string) =>
-    api.get(`/view-log/${logFile}`),
+    api.get(`/view-log/${encodeURIComponent(logFile)}`),
 
   listLogs: () =>
     api.get('/list-logs'),

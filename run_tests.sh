@@ -107,7 +107,13 @@ if [ "$VERBOSE" = true ]; then
 fi
 
 if [ "$PARALLEL" = true ]; then
-    PYTEST_CMD="$PYTEST_CMD -n auto"
+    # Check if pytest-xdist is installed for parallel execution
+    if python -c "import xdist" 2>/dev/null; then
+        PYTEST_CMD="$PYTEST_CMD -n auto"
+    else
+        print_warning "pytest-xdist not installed. Running tests sequentially."
+        print_warning "Install with: pip install pytest-xdist"
+    fi
 fi
 
 if [ "$RUN_COVERAGE" = true ]; then
@@ -173,10 +179,21 @@ fi
 if [ "$RUN_COVERAGE" = true ] && [ -f "test-results/coverage.xml" ]; then
     if command -v xmllint &> /dev/null; then
         COVERAGE=$(xmllint --xpath "string(//coverage/@line-rate)" test-results/coverage.xml 2>/dev/null || echo "N/A")
-        if [ "$COVERAGE" != "N/A" ]; then
-            COVERAGE_PERCENT=$(echo "$COVERAGE * 100" | bc -l 2>/dev/null | cut -d. -f1 2>/dev/null || echo "N/A")
-            echo "Code Coverage: ${COVERAGE_PERCENT}%"
+        if [ "$COVERAGE" != "N/A" ] && [ -n "$COVERAGE" ]; then
+            # Use awk as fallback if bc is not available
+            if command -v bc &> /dev/null; then
+                COVERAGE_PERCENT=$(echo "$COVERAGE * 100" | bc -l 2>/dev/null | cut -d. -f1 2>/dev/null || echo "N/A")
+            else
+                COVERAGE_PERCENT=$(awk "BEGIN {printf \"%.0f\", $COVERAGE * 100}" 2>/dev/null || echo "N/A")
+            fi
+            if [ "$COVERAGE_PERCENT" != "N/A" ] && [ -n "$COVERAGE_PERCENT" ]; then
+                echo "Code Coverage: ${COVERAGE_PERCENT}%"
+            else
+                print_warning "Could not calculate coverage percentage"
+            fi
         fi
+    else
+        print_warning "xmllint not available. Skipping coverage summary."
     fi
 fi
 

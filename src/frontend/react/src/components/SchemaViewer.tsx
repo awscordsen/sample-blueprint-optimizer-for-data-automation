@@ -17,7 +17,8 @@ export default function SchemaViewer() {
     setLoading(true)
     try {
       const response = await apiService.getFinalSchema()
-      console.log('Schema response:', response.data)
+      // Sanitize log output to prevent log injection (CWE-117)
+      console.log('Schema response status:', response.data?.status ?? 'unknown')
       
       if (response.data.status === 'success' && response.data.schema) {
         try {

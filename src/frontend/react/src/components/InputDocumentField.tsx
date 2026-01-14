@@ -83,6 +83,9 @@ const InputDocumentField: React.FC<InputDocumentFieldProps> = ({
   const loadS3Buckets = async () => {
     try {
       const response = await fetch('/api/list-s3-buckets');
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`);
+      }
       const data = await response.json();
       
       if (data.status === 'success') {
@@ -124,6 +127,10 @@ const InputDocumentField: React.FC<InputDocumentFieldProps> = ({
           s3_prefix: s3Prefix
         })
       });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`);
+      }
 
       const data = await response.json();
 
@@ -222,6 +229,10 @@ const InputDocumentField: React.FC<InputDocumentFieldProps> = ({
       });
 
       clearInterval(progressInterval);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`);
+      }
 
       const data = await response.json();
 
@@ -348,7 +359,7 @@ const InputDocumentField: React.FC<InputDocumentFieldProps> = ({
             >
               <Select
                 selectedOption={selectedBucket ? { label: selectedBucket, value: selectedBucket } : null}
-                onChange={({ detail }) => setSelectedBucket(detail.selectedOption.value || '')}
+                onChange={({ detail }) => setSelectedBucket(detail.selectedOption?.value || '')}
                 options={bucketOptions}
                 placeholder="Select an S3 bucket"
                 loadingText="Loading buckets..."
@@ -387,14 +398,14 @@ const InputDocumentField: React.FC<InputDocumentFieldProps> = ({
 
           <FormField
             label="Select Document"
-            description="Choose a document file to upload (max 100MB)"
+            description="Choose a PDF document to upload (max 100MB)"
           >
             <SpaceBetween direction="vertical" size="s">
               <input
                 ref={fileInputRef}
                 type="file"
                 onChange={handleFileSelect}
-                accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.tif"
+                accept=".pdf"
                 style={{
                   padding: '8px',
                   border: '2px dashed #ccc',

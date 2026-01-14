@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Container,
   Header,
@@ -54,6 +54,16 @@ const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUploadSuccess, curren
   });
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Cleanup interval on unmount
+  useEffect(() => {
+    return () => {
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
+    };
+  }, []);
 
   // Load S3 buckets on component mount
   React.useEffect(() => {
@@ -70,6 +80,9 @@ const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUploadSuccess, curren
   const loadS3Buckets = async () => {
     try {
       const response = await fetch('/api/list-s3-buckets');
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`);
+      }
       const data = await response.json();
       
       if (data.status === 'success') {
@@ -106,6 +119,10 @@ const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUploadSuccess, curren
           s3_prefix: s3Prefix
         })
       });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`);
+      }
 
       const data = await response.json();
 
@@ -197,6 +214,7 @@ const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUploadSuccess, curren
           progress: Math.min(prev.progress + 10, 90)
         }));
       }, 200);
+      progressIntervalRef.current = progressInterval;
 
       const response = await fetch('/api/upload-document', {
         method: 'POST',
@@ -204,6 +222,11 @@ const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUploadSuccess, curren
       });
 
       clearInterval(progressInterval);
+      progressIntervalRef.current = null;
+
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`);
+      }
 
       const data = await response.json();
 
@@ -230,6 +253,10 @@ const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUploadSuccess, curren
         });
       }
     } catch (error) {
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
       setUploadProgress({
         status: 'error',
         progress: 0,
@@ -276,7 +303,7 @@ const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUploadSuccess, curren
           >
             <Select
               selectedOption={selectedBucket ? { label: selectedBucket, value: selectedBucket } : null}
-              onChange={({ detail }) => setSelectedBucket(detail.selectedOption.value || '')}
+              onChange={({ detail }) => setSelectedBucket(detail.selectedOption?.value || '')}
               options={bucketOptions}
               placeholder="Select an S3 bucket"
               loadingText="Loading buckets..."
@@ -315,14 +342,14 @@ const DocumentUpload: React.FC<DocumentUploadProps> = ({ onUploadSuccess, curren
 
         <FormField
           label="Select Document"
-          description="Choose a document file to upload (max 100MB)"
+          description="Choose a PDF document to upload (max 100MB)"
         >
           <SpaceBetween direction="vertical" size="s">
             <input
               ref={fileInputRef}
               type="file"
               onChange={handleFileSelect}
-              accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.tif"
+              accept=".pdf"
               style={{
                 padding: '8px',
                 border: '2px dashed #ccc',

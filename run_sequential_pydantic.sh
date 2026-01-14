@@ -66,8 +66,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 # Create necessary directories if they don't exist
 echo "Setting up directories..."
-mkdir -p output
-mkdir -p output/schemas output/reports output/inputs output/bda_output output/html_output output/merged_df_output output/similarity_output logs
+mkdir -p "$SCRIPT_DIR/output"
+mkdir -p "$SCRIPT_DIR/output/schemas" "$SCRIPT_DIR/output/reports" "$SCRIPT_DIR/output/inputs" "$SCRIPT_DIR/output/bda_output" "$SCRIPT_DIR/output/html_output" "$SCRIPT_DIR/output/merged_df_output" "$SCRIPT_DIR/output/similarity_output" "$SCRIPT_DIR/logs"
 
 # Clean up if requested
 if [ "$CLEAN" = true ]; then
@@ -75,9 +75,9 @@ if [ "$CLEAN" = true ]; then
   python3 "$SCRIPT_DIR/cleanup.py"
 fi
 
-# Check if input file exists
-if [ ! -f "input_0.json" ]; then
-  echo "Error: input_0.json not found"
+# Check if input file exists (use SCRIPT_DIR to work from any directory)
+if [ ! -f "$SCRIPT_DIR/input_0.json" ]; then
+  echo "Error: input_0.json not found in $SCRIPT_DIR"
   echo "Please create an input_0.json file with your configuration."
   echo "See the README.md and DETAILED_GUIDE.md for more information."
   exit 1
@@ -96,5 +96,5 @@ fi
 echo "Logs will be written to the logs directory"
 
 # Change to the script directory and run the Python script
-cd "$SCRIPT_DIR"
-python3 app_sequential_pydantic.py input_0.json --threshold $THRESHOLD $USE_DOC $USE_TEMPLATE --model "$MODEL" --max-iterations $MAX_ITERATIONS
+cd "$SCRIPT_DIR" || { echo "Error: Cannot change to script directory $SCRIPT_DIR"; exit 1; }
+python3 app_sequential_pydantic.py input_0.json --threshold $THRESHOLD $USE_DOC $USE_TEMPLATE --model "$MODEL" --max-iterations $MAX_ITERATIONS || { echo "Error: Python script failed with exit code $?"; exit 1; }

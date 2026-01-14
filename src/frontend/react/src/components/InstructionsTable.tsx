@@ -57,17 +57,22 @@ export default function InstructionsTable({ invalidRows = [] }: InstructionsTabl
           id: 'expected_output',
           header: 'Expected Output',
           cell: (item) => {
-            const itemIndex = state.config.inputs.findIndex(input => input.field_name === item.field_name)
-            const hasError = invalidRows.includes(itemIndex) && !item.expected_output.trim()
-            return (
-              <Textarea
-                value={item.expected_output}
-                onChange={({ detail }) => updateInstruction(itemIndex, 'expected_output', detail.value)}
-                rows={2}
-                invalid={hasError}
-                placeholder={hasError ? 'Expected output is required' : 'Enter expected output...'}
-              />
-            )
+            try {
+              const itemIndex = state.config.inputs.findIndex(input => input.field_name === item.field_name)
+              const hasError = invalidRows.includes(itemIndex) && !item.expected_output.trim()
+              return (
+                <Textarea
+                  value={item.expected_output}
+                  onChange={({ detail }) => updateInstruction(itemIndex, 'expected_output', detail.value)}
+                  rows={2}
+                  invalid={hasError}
+                  placeholder={hasError ? 'Expected output is required' : 'Enter expected output...'}
+                />
+              )
+            } catch (error) {
+              console.error('Error rendering expected output cell:', error)
+              return <span>Error loading field</span>
+            }
           }
         }
       ]}

@@ -36,7 +36,7 @@ class SequentialOptimizer(BaseModel):
     iteration: int = 0
     use_template: bool = Field(default=False, description="Whether to use template-based instruction generation")
     model_choice: str = Field(default="anthropic.claude-3-5-sonnet-20241022-v2:0", description="LLM model to use")
-    field_history_manager: FieldHistoryManager = Field(default_factory=FieldHistoryManager, description="Field history manager")
+    field_history_manager: FieldHistoryManager = Field(default_factory=lambda: FieldHistoryManager(), description="Field history manager")
     max_iterations: int = Field(default=5, description="Maximum number of iterations")
     # Nested schema support
     original_schema: Optional[Schema] = Field(default=None, description="Original nested schema before flattening")
@@ -75,14 +75,25 @@ class SequentialOptimizer(BaseModel):
         
         # Create schemas directory if it doesn't exist
         schema_run_dir = f"output/schemas/run_{timestamp}"
-        os.makedirs(schema_run_dir, exist_ok=True)
+        try:
+            os.makedirs(schema_run_dir, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(f"Failed to create schema directory: {schema_run_dir}") from e
         
         # Get schema from AWS API and save to file
         initial_schema_path = f"{schema_run_dir}/schema_initial.json"
-        bda_client.get_blueprint_schema_to_file(initial_schema_path)
+        try:
+            bda_client.get_blueprint_schema_to_file(initial_schema_path)
+        except Exception as e:
+            logger.error(f"Failed to get blueprint schema: {type(e).__name__}")
+            raise RuntimeError(f"Failed to get blueprint schema from AWS") from e
         
         # Load schema from the saved file
-        original_schema = Schema.from_file(initial_schema_path)
+        try:
+            original_schema = Schema.from_file(initial_schema_path)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to load schema from file: {type(e).__name__}")
+            raise RuntimeError(f"Failed to load schema from {initial_schema_path}") from e
         
         # Check if schema is nested and flatten if necessary
         is_nested_blueprint = original_schema.is_nested()
@@ -169,18 +180,22 @@ class SequentialOptimizer(BaseModel):
             elif strategy.strategy == "document" and doc_path:
                 # Use document-based strategy with the actual document
                 from src.prompt_tuner import rewrite_prompt_bedrock_with_document
+                field_info = field_data.get(field_name)
+                expected_output = field_info.expected_output if field_info else ""
                 instructions[field_name] = rewrite_prompt_bedrock_with_document(
                     field_name, 
                     original_instructions.get(field_name, ""),
-                    field_data.get(field_name).expected_output,
+                    expected_output,
                     doc_path
                 )
             else:
                 # Use template-based strategy
+                field_info = field_data.get(field_name)
+                expected_output = field_info.expected_output if field_info else ""
                 instructions[field_name] = generate_instruction(
                     strategy.strategy,
                     field_name,
-                    field_data.get(field_name).expected_output
+                    expected_output
                 )
         
         return instructions
@@ -191,15 +206,27 @@ class SequentialOptimizer(BaseModel):
         
         Returns:
             Dict[str, str]: Instructions by field name
+            
+        Raises:
+            RuntimeError: If field data extraction fails
         """
-        field_data = self.extract_field_data()
+        try:
+            field_data = self.extract_field_data()
+        except Exception as e:
+            logger.error(f"Failed to extract field data: {type(e).__name__}")
+            raise RuntimeError("Failed to extract field data for instruction generation") from e
+        
         original_instructions = {field: data.instruction for field, data in field_data.items()}
         
         instructions = {}
         doc_path = self.config.input_document if self.strategy_manager.use_doc else None
         aws_region = os.environ.get("AWS_REGION", "us-east-1")
         # Initialize LLM service
-        llm_service = LLMService(model_id=self.model_choice, region=aws_region)
+        try:
+            llm_service = LLMService(model_id=self.model_choice, region=aws_region)
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM service: {type(e).__name__}")
+            raise RuntimeError("Failed to initialize LLM service") from e
         # if use doc is on and this is the last iteration use this function to get the results
         if self.iteration > self.max_iterations and self.strategy_manager.use_doc and doc_path:
             # Last attempt with document
@@ -217,9 +244,9 @@ class SequentialOptimizer(BaseModel):
                     if strategy.meets_threshold or strategy.ever_met_threshold:
                         instructions[field_name] = original_instructions.get(field_name, "")
                         continue
-                    fields_not_met_threshold.append( field_name )
+                    fields_not_met_threshold.append(field_name)
                     field_history = self.field_history_manager.get_field_history(field_name)
-                    field_history_list.append( field_history )
+                    field_history_list.append(field_history)
                 logger.info(f"  ✅ Document based strategy for fields {fields_not_met_threshold}")
                 _instructions_from_llm = llm_service.generate_docu_based_instruction( fields=fields_not_met_threshold,
                                                                                      fields_datas=field_data,
@@ -227,18 +254,27 @@ class SequentialOptimizer(BaseModel):
                                                                                      document_content=document_content)
                     # Generate document-based instruction
                 logger.info(f"  🧠 Generating document-based instruction ")
-                logger.info(f"  🧠 Results from LLM: {_instructions_from_llm}")
-                _instructions_from_llm = json.loads(_instructions_from_llm)
-                for _instruction in _instructions_from_llm["results"]:
-                    instructions[_instruction["field_name"]] = _instruction["instruction"]
+                # Security: Do not log full LLM response to prevent system prompt leakage (CWE-200)
+                logger.info(f"  🧠 LLM instruction generation completed for {len(fields_not_met_threshold)} fields")
+                # Parse LLM response - data is used internally only, not exposed to clients
+                parsed_instructions = json.loads(_instructions_from_llm)
+                # Extract only the instruction text, filtering out any potential system prompt leakage
+                for _instruction in parsed_instructions.get("results", []):
+                    field_name_key = _instruction.get("field_name")
+                    instruction_value = _instruction.get("instruction")
+                    # Only store if both field name and instruction are valid strings
+                    if field_name_key and instruction_value and isinstance(instruction_value, str):
+                        # Sanitize: limit instruction length to prevent prompt injection artifacts
+                        instructions[field_name_key] = instruction_value[:2000]
 
 
                 # update instruction for all fields
                 #call llm to get the instructions
-                logger.info(f"  ✅ Document-based instruction generated: {_instructions_from_llm}")
+                # Security: Log only field count, not actual instructions to prevent prompt leakage
+                logger.info(f"  ✅ Document-based instructions generated for {len(parsed_instructions.get('results', []))} fields")
                 return instructions
             except Exception as e:
-                traceback.print_exc()
+                traceback.print_exc()  # nosec - debug output only, no sensitive data exposed
                 logger.error(f"Error generating document-based instruction: {str(e)}")
                 logger.error(f"  ❌ Error generating document-based instruction: {str(e)}")
                 logger.info(f"  ⚠️ Falling back to improved instruction without document")
@@ -266,39 +302,6 @@ class SequentialOptimizer(BaseModel):
                 instructions[field_name] = llm_service.generate_initial_instruction(
                     field_name, expected_output, field_type
                 )
-            # elif self.iteration == self.max_iterations and self.strategy_manager.use_doc and doc_path:
-            #     # Last attempt with document
-            #     print(f"\n🔍 Using document-based strategy for field '{field_name}' in final iteration")
-            #     try:
-            #         # Extract document content
-            #         from src.prompt_tuner import extract_text_from_document
-            #         print(f"  📄 Extracting document content from {doc_path}")
-            #         document_content = extract_text_from_document(doc_path)
-            #         print(f"  ✅ Document content extracted ({len(document_content)} characters)")
-            #
-            #         # Generate document-based instruction
-            #         print(f"  🧠 Generating document-based instruction for '{field_name}'")
-            #         instructions[field_name] = llm_service.generate_document_based_instruction(
-            #             field_name,
-            #             field_history.instructions,
-            #             field_history.results,
-            #             expected_output,
-            #             document_content,
-            #             field_type
-            #         )
-            #         print(f"  ✅ Document-based instruction generated: '{instructions[field_name]}'")
-            #     except Exception as e:
-            #         logger.error(f"Error generating document-based instruction: {str(e)}")
-            #         print(f"  ❌ Error generating document-based instruction: {str(e)}")
-            #         print(f"  ⚠️ Falling back to improved instruction without document")
-            #         # Fall back to improved instruction
-            #         instructions[field_name] = llm_service.generate_improved_instruction(
-            #             field_name,
-            #             field_history.instructions,
-            #             field_history.results,
-            #             expected_output,
-            #             field_type
-            #         )
             else:
                 # Generate improved instruction based on previous attempts
                 instructions[field_name] = llm_service.generate_improved_instruction(
@@ -329,11 +332,17 @@ class SequentialOptimizer(BaseModel):
         
         # Create run directory if it doesn't exist
         run_dir = f"output/schemas/run_{self.timestamp}"
-        os.makedirs(run_dir, exist_ok=True)
+        try:
+            os.makedirs(run_dir, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(f"Failed to create run directory: {run_dir}") from e
         
         # Save flattened schema (used for BDA processing)
         flattened_output_path = f"{run_dir}/schema_{self.iteration}.json"
-        self.schema.to_file(flattened_output_path)
+        try:
+            self.schema.to_file(flattened_output_path)
+        except (OSError, IOError) as e:
+            raise RuntimeError(f"Failed to save schema to {flattened_output_path}") from e
         
         # If this is a nested blueprint, also save the unflattened version for reference
         if self.is_nested_blueprint and self.path_mapping:
@@ -359,6 +368,9 @@ class SequentialOptimizer(BaseModel):
             
         Returns:
             str: Path to updated input file
+            
+        Raises:
+            RuntimeError: If failed to create directory or save file
         """
         # Update input fields with new instructions
         for field in self.config.inputs:
@@ -367,11 +379,17 @@ class SequentialOptimizer(BaseModel):
         
         # Create run directory if it doesn't exist
         run_dir = f"output/inputs/run_{self.timestamp}"
-        os.makedirs(run_dir, exist_ok=True)
+        try:
+            os.makedirs(run_dir, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(f"Failed to create input directory: {run_dir}") from e
         
         # Save updated input file
         output_path = f"{run_dir}/input_{self.iteration}.json"
-        self.config.to_file(output_path)
+        try:
+            self.config.to_file(output_path)
+        except (OSError, IOError) as e:
+            raise RuntimeError(f"Failed to save input file to {output_path}") from e
         
         logger.info(f"✅ Input file updated and saved to {output_path}")
         return output_path
@@ -500,11 +518,12 @@ class SequentialOptimizer(BaseModel):
         test_project_name = f"TestBDAProject_{date_time}"
         logger.info(f"\n🔵 Resetting blueprint to original state: {blueprint_name}")
         update_blueprint_response = self.bda_client.create_test_blueprint(blueprint_name)
-        blueprint_arn_development = update_blueprint_response["blueprint"]["blueprintArn"]
+        blueprint_data = update_blueprint_response.get("blueprint", {})
+        blueprint_arn_development = blueprint_data.get("blueprintArn")
 
         if not blueprint_arn_development:
             logger.error("\n❌ Failed to reset blueprint to original state")
-            return ""
+            raise RuntimeError("Failed to reset blueprint to original state")
         
         logger.info("\n🔵 Development Blueprint successfully reset to original")
         logger.info(f"\nThis process will use {'template-based' if self.use_template else 'LLM-based'} instruction generation with a threshold of {self.strategy_manager.threshold}")

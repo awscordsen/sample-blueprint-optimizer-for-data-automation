@@ -123,7 +123,7 @@ class LLMService:
                     if error_code == 'ThrottlingException':
                         if retries < max_retries:
                             # Calculate delay with exponential backoff and jitter
-                            delay = min(max_delay, base_delay * (2 ** retries)) + random.uniform(0, 1)
+                            delay = min(max_delay, base_delay * (2 ** retries)) + random.uniform(0, 1)  # nosec B311
                             logger.warning(f"Throttling error with model {model_id}. Retrying in {delay:.2f} seconds...")
                             print(f"  ⚠️ Throttling error with model {model_id}. Retrying in {delay:.2f} seconds...")
                             time.sleep(delay)
@@ -281,7 +281,18 @@ class LLMService:
 
         Returns:
             str: Generated instruction
+            
+        Raises:
+            ValueError: If document_content is None or empty
         """
+        # Validate document_content parameter
+        if document_content is None:
+            raise ValueError("document_content cannot be None")
+        if not isinstance(document_content, str):
+            raise ValueError("document_content must be a string")
+        if not document_content.strip():
+            raise ValueError("document_content cannot be empty")
+            
         system_prompt = """
         You are an expert at creating simple extraction instructions for document AI systems.
         Create a short, direct instruction (under 100 characters if possible) based on document content.
@@ -303,9 +314,9 @@ class LLMService:
             appropriate for {field_type} data.
             """
 
-        # Truncate document content if too long
+        # Truncate document content if too long (document_content validated at method start)
         max_doc_length = 10000
-        if len(document_content) > max_doc_length:
+        if document_content and len(document_content) > max_doc_length:  # noqa: document_content validated above
             document_content = document_content[:max_doc_length] + "... [document truncated]"
 
         user_prompt = f"""
@@ -335,21 +346,30 @@ class LLMService:
                                         fields: List[str],
                                         fields_datas: Dict[str, FieldData],
                                         fields_history_list: List[Optional[FieldHistory]],
-                                        document_content) -> str:
+                                        document_content: str) -> str:
         """
         Generate instruction using document as context.
 
         Args:
-            field_name: Name of the field
-            previous_instructions: Previous instructions
-            previous_results: Previous results
-            expected_output: Expected output
-            document_content: Document content
-            field_type: Type of the field
+            fields: List of field names to generate instructions for
+            fields_datas: Dictionary mapping field names to FieldData objects
+            fields_history_list: List of FieldHistory objects for each field
+            document_content: Document content as string
 
         Returns:
-            str: Generated instruction
+            str: Generated instruction in JSON format
+            
+        Raises:
+            ValueError: If document_content is None or empty
         """
+        # Validate document_content parameter
+        if document_content is None:
+            raise ValueError("document_content cannot be None")
+        if not isinstance(document_content, str):
+            raise ValueError("document_content must be a string")
+        if not document_content.strip():
+            raise ValueError("document_content cannot be empty")
+            
         _fields_data = []
         for field_name in fields:
             field_data = fields_datas[field_name]
@@ -380,9 +400,15 @@ class LLMService:
         history = []
         history.append("<fields_history>")
         for field_history in fields_history_list:
-            history.append(f"Field name: {field_history.field_name}")
+            if field_history is None:
+                continue
+            field_name = getattr(field_history, 'field_name', None)
+            instructions = getattr(field_history, 'instructions', None)
+            if field_name is None or instructions is None:
+                continue
+            history.append(f"Field name: {field_name}")
             history.append( f"Previous instruction attempts:")
-            history.append( json.dumps(field_history.instructions) )
+            history.append( json.dumps(instructions) )
             history.append( "   ")
         history.append("</fields_history>")
         ##Create new extraction instruction for all the fields which will be used by LLM later to extract data from similar documents.
@@ -414,14 +440,18 @@ class LLMService:
         start = "<result>"
         end = "</result>"
 
-        # Find the index of the start substring
-        idx1 = instruction.find(start)
+        try:
+            # Find the index of the start substring
+            idx1 = instruction.find(start)
 
-        # Find the index of the end substring, starting after the start substring
-        idx2 = instruction.find(end, idx1 + len(start))
-        # Check if both delimiters are found and extract the substring between them
-        if idx1 != -1 and idx2 != -1:
-            return instruction[idx1 + len(start):idx2]
-        else:
-            raise Exception("Not able to get expected results from LLM")
+            # Find the index of the end substring, starting after the start substring
+            idx2 = instruction.find(end, idx1 + len(start))
+            # Check if both delimiters are found and extract the substring between them
+            if idx1 != -1 and idx2 != -1:
+                return instruction[idx1 + len(start):idx2]
+            else:
+                raise Exception("Not able to get expected results from LLM")
+        except Exception as e:
+            logger.error(f"Error parsing LLM response: {type(e).__name__}")
+            raise Exception("Not able to get expected results from LLM") from e
 

@@ -1,6 +1,7 @@
 """
 Template-based prompt generation for sequential BDA optimization.
 """
+import html
 import json
 from typing import Dict, List, Optional
 
@@ -115,9 +116,9 @@ def generate_instruction(strategy: str, field_name: str, expected_output: str) -
     Returns:
         str: Generated instruction
     """
-    # Sanitize inputs to avoid special characters
-    field_name = sanitize_text(field_name)
-    sanitized_output = sanitize_text(expected_output)
+    # Sanitize inputs to avoid special characters and XSS
+    field_name = html.escape(sanitize_text(field_name))
+    sanitized_output = html.escape(sanitize_text(expected_output))
     
     # Create a short example from the expected output
     example = sanitized_output

@@ -64,10 +64,34 @@ export default function LogViewer() {
 
   // Auto-start tailing when optimizer is running
   useEffect(() => {
-    if (state.status.status === 'running' && state.currentLogFile && !isTailing) {
-      toggleTailing()
+    // Check isTailing inside the effect to avoid infinite re-renders
+    // since toggleTailing modifies isTailing state
+    if (state.status.status === 'running' && state.currentLogFile) {
+      setIsTailing((currentIsTailing) => {
+        if (!currentIsTailing) {
+          // Start tailing - load immediately and set up interval
+          loadLogFile(state.currentLogFile!)
+          const interval = setInterval(() => {
+            if (state.currentLogFile) {
+              loadLogFile(state.currentLogFile)
+            }
+          }, 1000)
+          setTailInterval(interval)
+        }
+        return true
+      })
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.status.status, state.currentLogFile])
+
+  // Cleanup interval on unmount
+  useEffect(() => {
+    return () => {
+      if (tailInterval) {
+        clearInterval(tailInterval)
+      }
+    }
+  }, [tailInterval])
 
   const cleanLogs = async () => {
     try {
@@ -77,6 +101,13 @@ export default function LogViewer() {
       dispatch({ type: 'SET_CURRENT_LOG', payload: null })
     } catch (error) {
       console.error('Error cleaning logs:', error)
+      dispatch({
+        type: 'ADD_NOTIFICATION',
+        payload: {
+          type: 'error',
+          message: 'Failed to clean logs. Please try again.'
+        }
+      })
     }
   }
 
@@ -112,7 +143,8 @@ export default function LogViewer() {
               : null
           }
           onChange={({ detail }) => {
-            const logFile = detail.selectedOption.value!
+            const logFile = detail.selectedOption?.value || ''
+            if (!logFile) return
             dispatch({ type: 'SET_CURRENT_LOG', payload: logFile })
             loadLogFile(logFile)
           }}

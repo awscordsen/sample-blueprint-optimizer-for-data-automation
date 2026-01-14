@@ -56,15 +56,23 @@ def rewrite_prompt_bedrock(field_name, original_prompt, expected_output):
         "top_p": 0.9
     })
 
-    response = bedrock_runtime_client.invoke_model(
-        modelId="anthropic.claude-v2",
-        body=request_body,
-        accept="application/json",
-        contentType="application/json"
-    )
+    try:
+        response = bedrock_runtime_client.invoke_model(
+            modelId="anthropic.claude-v2",
+            body=request_body,
+            accept="application/json",
+            contentType="application/json"
+        )
+    except Exception as e:
+        logger.error(f"Bedrock API call failed: {type(e).__name__}")
+        raise RuntimeError("Failed to invoke Bedrock model") from e
 
-    response_body = json.loads(response["body"].read())
-    completion_text = response_body["completion"].strip()
+    try:
+        response_body = json.loads(response["body"].read())
+        completion_text = response_body.get("completion", "").strip()
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error(f"Failed to parse Bedrock response: {type(e).__name__}")
+        raise RuntimeError("Failed to parse Bedrock model response") from e
 
     # Remove prefixed explanation if present
     if "\n" in completion_text:
@@ -103,13 +111,15 @@ def extract_text_from_document(source_document_path):
         bedrock_runtime_client = aws.bedrock_runtime
         
         # Create message with document
+        # NOTE: Currently only PDF format is supported. Future enhancement: detect format from file extension
+        # TODO: Add support for other document formats (doc, docx, txt, png, jpg, tiff) when needed
         doc_message = {
             "role": "user",
             "content": [
                 {
                     "document": {
                         "name": "Document",
-                        "format": "pdf",
+                        "format": "pdf",  # Currently only PDF is supported
                         "source": {
                             "bytes": document_bytes
                         }
@@ -154,7 +164,7 @@ def rewrite_prompt_bedrock_with_document(field_name, original_prompt, expected_o
     
     prompt = f"""
     You are an expert at prompt engineering. You need to create an instruction that will accurately extract the {field_name} from the given document. 
-    This is the current instruction: '{original_prompt}'. The expected output of the extraction should resemble '{expected_output}.  
+    This is the current instruction: '{original_prompt}'. The expected output of the extraction should resemble '{expected_output}'.  
     Using the given document and the above information, create a better instruction.
     Only output the new instruction, without any text before or after. Do not include any newlines or escape characters in the instruction.
     Do not directly use words from the expected output in your instruction. Your instruction cannot be more than 300 characters. 
@@ -164,14 +174,17 @@ def rewrite_prompt_bedrock_with_document(field_name, original_prompt, expected_o
         document_bytes = read_s3_object(source_document_path)
     except Exception as e: 
         print(f"An error occured: {e}")
+        raise RuntimeError(f"Failed to read document from S3: {e}") from e
     
+    # NOTE: Currently only PDF format is supported. Future enhancement: detect format from file extension
+    # TODO: Add support for other document formats (doc, docx, txt, png, jpg, tiff) when needed
     doc_message = {
         "role": "user",
         "content": [
             {
                 "document": {
                     "name": "Document 1",
-                    "format": "pdf",
+                    "format": "pdf",  # Currently only PDF is supported
                     "source": {
                         "bytes": document_bytes
                     }
@@ -182,16 +195,24 @@ def rewrite_prompt_bedrock_with_document(field_name, original_prompt, expected_o
     }
 
 
-    response = bedrock_runtime_client.converse(
-        modelId="anthropic.claude-3-5-sonnet-20241022-v2:0",
-        messages=[doc_message],
-        inferenceConfig={
-            "maxTokens": 2000,
-            "temperature": 0
-        },
-    )
+    try:
+        response = bedrock_runtime_client.converse(
+            modelId="anthropic.claude-3-5-sonnet-20241022-v2:0",
+            messages=[doc_message],
+            inferenceConfig={
+                "maxTokens": 2000,
+                "temperature": 0
+            },
+        )
+    except Exception as e:
+        logger.error(f"Bedrock API call failed: {type(e).__name__}")
+        raise RuntimeError("Failed to invoke Bedrock model for document processing") from e
 
-    completion_text = response['output']['message']['content'][0]['text'].strip()
+    try:
+        completion_text = response['output']['message']['content'][0]['text'].strip()
+    except (KeyError, IndexError, TypeError) as e:
+        logger.error(f"Failed to parse Bedrock response: {type(e).__name__}")
+        raise RuntimeError("Failed to parse Bedrock model response") from e
     # print("Output from LLM:", completion_text)
 
 

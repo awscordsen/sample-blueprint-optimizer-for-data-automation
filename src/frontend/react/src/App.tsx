@@ -18,13 +18,18 @@ function AppContent() {
 
   // Auto-dismiss notifications
   useEffect(() => {
+    const timeoutIds: NodeJS.Timeout[] = [];
     state.notifications.forEach(notification => {
       if (notification.autoDismiss) {
-        setTimeout(() => {
+        const timeoutId = setTimeout(() => {
           dispatch({ type: 'REMOVE_NOTIFICATION', payload: notification.id })
         }, 5000)
+        timeoutIds.push(timeoutId);
       }
     })
+    return () => {
+      timeoutIds.forEach(id => clearTimeout(id));
+    };
   }, [state.notifications, dispatch])
 
   return (

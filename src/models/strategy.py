@@ -4,6 +4,9 @@ Strategy models for the BDA optimization application.
 from typing import Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
 import pandas as pd
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class FieldData(BaseModel):
@@ -51,7 +54,24 @@ class StrategyManager(BaseModel):
             
         Returns:
             StrategyManager: Initialized strategy manager
+            
+        Raises:
+            ValueError: If field_names is None or empty, or if threshold is invalid
         """
+        # Input validation for field_names parameter
+        if field_names is None:
+            raise ValueError("field_names cannot be None")
+        if not isinstance(field_names, list):
+            raise ValueError("field_names must be a list")
+        if len(field_names) == 0:
+            raise ValueError("field_names cannot be empty")
+        
+        # Validate threshold
+        if threshold is None or not isinstance(threshold, (int, float)):
+            raise ValueError("threshold must be a numeric value")
+        if not (0.0 <= threshold <= 1.0):
+            raise ValueError("threshold must be between 0.0 and 1.0")
+        
         strategies = {
             field_name: FieldStrategy(
                 field_name=field_name,
@@ -102,12 +122,12 @@ class StrategyManager(BaseModel):
                 if next_strategy:
                     self.strategies[field_name].strategy = next_strategy
                     updated = True
-                    print(f"Field '{field_name}' strategy updated: {current_strategy} → {next_strategy}")
+                    logger.info(f"Field '{field_name}' strategy updated: {current_strategy} → {next_strategy}")
                 else:
-                    print(f"No more strategies available for field '{field_name}'")
+                    logger.info(f"No more strategies available for field '{field_name}'")
             elif strategy.ever_met_threshold and not strategy.meets_threshold:
                 # Field has met threshold before but doesn't currently meet it (due to non-deterministic BDA output)
-                print(f"Field '{field_name}' has met threshold before, keeping strategy: {strategy.strategy}")
+                logger.info(f"Field '{field_name}' has met threshold before, keeping strategy: {strategy.strategy}")
         
         return updated
     
@@ -118,6 +138,8 @@ class StrategyManager(BaseModel):
         Returns:
             bool: Whether all fields meet the threshold
         """
+        if not self.strategies:
+            return True  # No fields means threshold is trivially met
         return all(strategy.meets_threshold for strategy in self.strategies.values())
     
     def to_dataframe(self) -> pd.DataFrame:
@@ -126,17 +148,24 @@ class StrategyManager(BaseModel):
         
         Returns:
             pd.DataFrame: DataFrame with strategies
+            
+        Raises:
+            RuntimeError: If DataFrame creation fails
         """
-        data = []
-        for field_name, strategy in self.strategies.items():
-            data.append({
-                "Field": field_name,
-                "Strategy": strategy.strategy,
-                "Similarity": strategy.similarity,
-                "Meets Threshold": strategy.meets_threshold,
-                "Ever Met Threshold": strategy.ever_met_threshold
-            })
-        return pd.DataFrame(data)
+        try:
+            data = []
+            for field_name, strategy in self.strategies.items():
+                data.append({
+                    "Field": field_name,
+                    "Strategy": strategy.strategy,
+                    "Similarity": strategy.similarity,
+                    "Meets Threshold": strategy.meets_threshold,
+                    "Ever Met Threshold": strategy.ever_met_threshold
+                })
+            return pd.DataFrame(data)
+        except Exception as e:
+            logger.error(f"Failed to create DataFrame from strategies: {str(e)}")
+            raise RuntimeError(f"Failed to convert strategies to DataFrame") from e
     
     def save_report(self, output_path: str) -> str:
         """
