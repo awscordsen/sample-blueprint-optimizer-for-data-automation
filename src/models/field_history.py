@@ -21,10 +21,23 @@ class FieldHistory(BaseModel):
             instruction: Instruction used
             result: Result obtained
             similarity: Similarity score
+            
+        Raises:
+            ValueError: If parameters are invalid
         """
+        # Validate input parameters
+        if instruction is None or not isinstance(instruction, str):
+            raise ValueError("instruction must be a non-null string")
+        if result is None or not isinstance(result, str):
+            raise ValueError("result must be a non-null string")
+        if similarity is None or not isinstance(similarity, (int, float)):
+            raise ValueError("similarity must be a numeric value")
+        if not (0.0 <= float(similarity) <= 1.0):
+            raise ValueError("similarity must be between 0.0 and 1.0")
+        
         self.instructions.append(instruction)
         self.results.append(result)
-        self.similarities.append(similarity)
+        self.similarities.append(float(similarity))
     
     def get_best_instruction(self) -> Optional[str]:
         """
@@ -82,7 +95,18 @@ class FieldHistoryManager(BaseModel):
         
         Args:
             field_names: List of field names
+            
+        Raises:
+            ValueError: If field_names is None or empty
         """
+        # Input validation for field_names parameter
+        if field_names is None:
+            raise ValueError("field_names cannot be None")
+        if not isinstance(field_names, list):
+            raise ValueError("field_names must be a list")
+        if len(field_names) == 0:
+            raise ValueError("field_names cannot be empty")
+        
         for field_name in field_names:
             if field_name not in self.histories:
                 self.histories[field_name] = FieldHistory(field_name=field_name)

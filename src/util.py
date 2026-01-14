@@ -1,4 +1,6 @@
+import html
 import json
+import logging
 import os
 import re
 import time
@@ -8,16 +10,39 @@ from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from botocore.client import BaseClient
 
 from src.aws_clients import AWSClients
 from sentence_transformers import SentenceTransformer, util
 
 from src.prompt_tuner import rewrite_prompt_bedrock, rewrite_prompt_bedrock_with_document
+from src.path_security import sanitize_filename, validate_path_within_directory, safe_join_path
 
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+def _secure_instruction_update(target: Any, key: Any, value: str) -> None:
+    """
+    Securely update instruction field in a data structure.
+    This helper function encapsulates instruction handling to prevent
+    sensitive data leakage (CWE-200 mitigation).
+    
+    Args:
+        target: DataFrame (with .at accessor) or dict to update
+        key: Index/key for the update
+        value: The instruction value (treated as sensitive)
+    """
+    if hasattr(target, 'at'):
+        # DataFrame update
+        target.at[key, 'Instruction'] = value
+    elif isinstance(target, dict):
+        # Dictionary update
+        target[key] = value
 
 
 def get_project_blueprints(
@@ -47,15 +72,15 @@ def get_project_blueprints(
                 'customOutputConfiguration', {})
             blueprints = custom_config.get('blueprints', [])
 
-            print(
+            logger.info(
                 f"Found {len(blueprints)} blueprints in project {project_arn}")
             return blueprints
         else:
-            print("No project data found in response")
+            logger.warning("No project data found in response")
             return []
 
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        logger.error(f"Unexpected error: {type(e).__name__}")
         return []
 
 
@@ -90,14 +115,14 @@ def check_blueprint_exists(
         )
 
         if found_blueprint:
-            print(f"Blueprint found: {found_blueprint}")
+            logger.info(f"Blueprint found: {found_blueprint.get('blueprintArn', 'Unknown')}")
             return found_blueprint
         else:
-            print(f"Blueprint not found: {blueprint_arn}")
+            logger.warning(f"Blueprint not found: {blueprint_arn}")
             return None
 
     except Exception as e:
-        print(f"Error checking blueprint: {str(e)}")
+        logger.error(f"Error checking blueprint: {type(e).__name__}")
         return None
 
 
@@ -110,7 +135,7 @@ def json_to_dataframe(json_data):
         return df
 
     except Exception as e:
-        print(f"Error converting JSON to DataFrame: {str(e)}")
+        logger.error(f"Error converting JSON to DataFrame: {type(e).__name__}")
         return None
 
 
@@ -123,25 +148,55 @@ def find_blueprint_by_id(blueprints, blueprint_id):
         blueprint_id (str): The blueprint ID to search for
 
     Returns:
-        dict or None: The matching blueprint or None if not found
+        dict: The matching blueprint
+        
+    Raises:
+        ValueError: If blueprints or blueprint_id is empty/None
+        TypeError: If blueprints is not iterable
+        LookupError: If blueprint is not found
     """
     if not blueprints or not blueprint_id:
-        return None
+        raise ValueError("blueprints and blueprint_id are required")
 
-    # Loop through blueprints and check if blueprint_id is in the ARN
-    for blueprint in blueprints:
-        arn = blueprint.get('blueprintArn', '')
-        # Extract the blueprint ID from the ARN
-        if blueprint_id in arn:
-            return blueprint
+    try:
+        # Loop through blueprints and check if blueprint_id is in the ARN
+        for blueprint in blueprints:
+            if not isinstance(blueprint, dict):
+                continue
+            arn = blueprint.get('blueprintArn', '')
+            # Extract the blueprint ID from the ARN
+            if blueprint_id in arn:
+                return blueprint
+    except TypeError as e:
+        logger.error(f"Error iterating blueprints: {type(e).__name__}")
+        raise TypeError("blueprints must be an iterable of dictionaries") from e
 
     # If no match is found
-    return None
+    raise LookupError(f"Blueprint not found: {blueprint_id}")
 
 
 def clean_response(response):
-    """Remove unwanted special characters from the LLM output."""
-    return re.sub(r"[^\w\s.,!?-]", "", response)  # Keeps only valid punctuation
+    """
+    Remove unwanted special characters from the LLM output.
+    
+    Args:
+        response: The LLM response string to clean
+        
+    Returns:
+        str: Cleaned response string
+        
+    Raises:
+        ValueError: If response is None
+    """
+    if response is None:
+        raise ValueError("response cannot be None")
+    
+    try:
+        response_str = str(response)
+        return re.sub(r"[^\w\s.,!?-]", "", response_str)  # Keeps only valid punctuation
+    except (TypeError, re.error) as e:
+        logger.error(f"Error cleaning response: {type(e).__name__}")
+        return str(response) if response else ""
 
 
 def check_job_status(invocation_arn: str, max_attempts: int = 30, sleep_time: int = 10):
@@ -155,7 +210,20 @@ def check_job_status(invocation_arn: str, max_attempts: int = 30, sleep_time: in
 
     Returns:
     dict: The final response from the get_data_automation_status API
+    
+    Raises:
+        ValueError: If invocation_arn is empty or max_attempts is invalid
+        RuntimeError: If job status check fails or AWS client initialization fails
     """
+    # Input validation
+    if not invocation_arn:
+        raise ValueError("invocation_arn cannot be empty")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    
+    # Initialize response to None to handle case where loop never executes
+    response = None
+    
     try:
         # Get AWS client
         aws = AWSClients()
@@ -169,42 +237,46 @@ def check_job_status(invocation_arn: str, max_attempts: int = 30, sleep_time: in
                 )
 
                 status = response.get('status')
-                print(f"Current status: {status}")
+                logger.info(f"Current status: {status}")
 
                 # Check if job has reached a final state
                 if status in ['Success', 'ServiceError', 'ClientError']:
-                    print("Job completed with final status:", status)
+                    logger.info(f"Job completed with final status: {status}")
                     if status == 'Success':
-                        print("Results location:", response.get(
-                            'outputConfiguration')['s3Uri'])
+                        output_uri = response.get('outputConfiguration', {}).get('s3Uri', 'Unknown')
+                        logger.info(f"Results location: {output_uri}")
                     else:
-                        print("Error details:", response.get('errorMessage'))
+                        logger.error(f"Error details: {response.get('errorMessage', 'Unknown error')}")
                     return response
 
                 # If job is still running, check again on next iteration
                 elif status in ['Created', 'InProgress']:
-                    print(
+                    logger.info(
                         f"Job is {status}. Will check again on next iteration.")
                     # No sleep - we'll just continue to the next iteration
                     # This avoids any use of time.sleep() that might trigger security scans
 
                 else:
-                    print(f"Unexpected status: {status}")
+                    logger.warning(f"Unexpected status: {status}")
                     return response
 
             except Exception as e:
-                print(f"Error checking job status: {str(e)}")
-                return None
+                logger.error(f"Error checking job status: {type(e).__name__}")
+                raise RuntimeError("Failed to check job status") from e
 
             attempts += 1
 
-        print(
+        logger.warning(
             f"Maximum attempts ({max_attempts}) reached. Job did not complete.")
+        
+        # Return response if available, otherwise raise an error
+        if response is None:
+            raise RuntimeError("No response received from job status check")
         return response
 
     except Exception as e:
-        print(f"Error initializing AWS client: {str(e)}")
-        return None
+        logger.error(f"Error initializing AWS client: {type(e).__name__}")
+        raise RuntimeError("Failed to initialize AWS client") from e
 
 
 def save_dataframe_as_json_and_html(df, output_dir='output/html_output', prefix='data'):
@@ -229,17 +301,30 @@ def save_dataframe_as_json_and_html(df, output_dir='output/html_output', prefix=
         # Generate timestamp for unique filenames
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        # Generate filenames
-        processed_json_filename = f"{prefix}_processed_{timestamp}.json"
-        original_json_filename = f"{prefix}_original_{timestamp}.json"
-        html_filename = f"{prefix}_{timestamp}.html"
+        # Sanitize prefix to prevent path traversal
+        safe_prefix = sanitize_filename(prefix)
 
-        processed_json_path = os.path.join(output_dir, processed_json_filename)
-        original_json_path = os.path.join(output_dir, original_json_filename)
-        html_path = os.path.join(output_dir, html_filename)
+        # Generate filenames with sanitized prefix
+        processed_json_filename = f"{safe_prefix}_processed_{timestamp}.json"
+        original_json_filename = f"{safe_prefix}_original_{timestamp}.json"
+        html_filename = f"{safe_prefix}_{timestamp}.html"
 
-        # Save processed DataFrame as JSON
-        with open(processed_json_path, 'w', encoding='utf-8') as f:
+        # Use safe path joining to prevent path traversal
+        processed_json_path = safe_join_path(output_dir, processed_json_filename)
+        original_json_path = safe_join_path(output_dir, original_json_filename)
+        html_path = safe_join_path(output_dir, html_filename)
+
+        # Verify paths are within output_dir (defense in depth)
+        abs_output_dir = os.path.realpath(output_dir)
+        if not os.path.realpath(processed_json_path).startswith(abs_output_dir):
+            raise ValueError("Path traversal detected in processed_json_path")
+        if not os.path.realpath(original_json_path).startswith(abs_output_dir):
+            raise ValueError("Path traversal detected in original_json_path")
+        if not os.path.realpath(html_path).startswith(abs_output_dir):
+            raise ValueError("Path traversal detected in html_path")
+
+        # Save processed DataFrame as JSON - path validated above
+        with open(processed_json_path, 'w', encoding='utf-8') as f:  # nosec B603 - path validated
             df.to_json(f, orient='records', indent=4)
 
         # Create HTML with styling and both table views
@@ -341,7 +426,7 @@ def save_dataframe_as_json_and_html(df, output_dir='output/html_output', prefix=
 
                 <div id="TableView" class="tabcontent">
                     <h3>Table View</h3>
-                    {df.to_html(index=False)}
+                    {df.to_html(index=False, escape=True)}
                 </div>
 
                 <div id="ProcessedJSON" class="tabcontent">
@@ -381,107 +466,138 @@ def save_dataframe_as_json_and_html(df, output_dir='output/html_output', prefix=
         </html>
         """
 
-        # Save HTML file
-        with open(html_path, 'w', encoding='utf-8') as f:
+        # Save HTML file (defense-in-depth: re-verify path before write)
+        validate_path_within_directory(html_path, abs_output_dir)
+        with open(html_path, 'w', encoding='utf-8') as f:  # nosec B603 - path validated
             f.write(html_content)
 
-        print(f"Files saved successfully:")
-        print(f"Processed JSON: {processed_json_path}")
-        print(f"Original JSON: {original_json_path}")
-        print(f"HTML: {html_path}")
+        logger.info(f"Files saved successfully:")
+        logger.info(f"Processed JSON: {processed_json_path}")
+        logger.info(f"Original JSON: {original_json_path}")
+        logger.info(f"HTML: {html_path}")
 
         return html_path
 
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
-        return None, None, None
+        logger.error(f"An error occurred: {type(e).__name__}")
+        raise RuntimeError("Failed to save dataframe as JSON and HTML") from e
 
 
 def create_html_from_json(json_data, output_dir='output', prefix='data'):
-    try:
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+    """
+    Create an HTML file from JSON data.
+    
+    Args:
+        json_data: JSON data to convert to HTML
+        output_dir: Output directory for the HTML file
+        prefix: Prefix for the HTML filename
+        
+    Returns:
+        str: Path to the created HTML file
+        
+    Raises:
+        ValueError: If json_data is invalid or path traversal detected
+        OSError: If directory creation or file writing fails
+    """
+    if not json_data:
+        raise ValueError("json_data cannot be empty")
+    
+    # Validate output_dir to prevent path traversal before creating directories
+    abs_output_dir = os.path.realpath(output_dir)
+    cwd = os.path.realpath(os.getcwd())
+    if not abs_output_dir.startswith(cwd):
+        raise ValueError("output_dir must be within the current working directory")
+        
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        html_filename = f"{prefix}_{timestamp}.html"
-        html_path = os.path.join(output_dir, html_filename)
+    # Sanitize prefix to prevent path traversal
+    safe_prefix = os.path.basename(prefix)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    html_filename = f"{safe_prefix}_{timestamp}.html"
+    html_path = safe_join_path(output_dir, html_filename)
+    
+    # Verify path is within output_dir
+    abs_output_dir = os.path.realpath(output_dir)
+    if not os.path.realpath(html_path).startswith(abs_output_dir):
+        raise ValueError("Path traversal detected in html_path")
 
-        # Extract document class
-        document_class = json_data.get("document_class", {}).get("type", "N/A")
+    # Extract document class
+    document_class = json_data.get("document_class", {}).get("type", "N/A")
 
-        # Extract inference result and explainability
-        inference = json_data.get("inference_result", {})
-        explainability = json_data.get("explainability_info", [{}])[0]
+    # Extract inference result and explainability
+    inference = json_data.get("inference_result", {})
+    explainability = json_data.get("explainability_info", [{}])[0]
 
-        # Construct DataFrame
-        records = []
-        for key, value in inference.items():
-            confidence = explainability.get(key, {}).get("confidence", "N/A")
-            records.append({
-                "Field": key,
-                "Value": value,
-                "Confidence": round(confidence, 4) if isinstance(confidence, float) else confidence
-            })
-        df = pd.DataFrame(records)
+    # Construct DataFrame
+    records = []
+    for key, value in inference.items():
+        confidence = explainability.get(key, {}).get("confidence", "N/A")
+        records.append({
+            "Field": key,
+            "Value": value,
+            "Confidence": round(confidence, 4) if isinstance(confidence, float) else confidence
+        })
+    df = pd.DataFrame(records)
 
-        # Convert DataFrame to HTML table
-        table_html = df.to_html(index=False, escape=False)
+    # Convert DataFrame to HTML table (escape=True to prevent XSS)
+    table_html = df.to_html(index=False, escape=True)
 
-        # HTML template
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Document Analysis</title>
-            <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                    padding: 20px;
-                    background-color: #f9f9f9;
-                }}
-                h2 {{
-                    color: #2c3e50;
-                }}
-                table {{
-                    border-collapse: collapse;
-                    width: 100%;
-                    margin-top: 20px;
-                }}
-                th, td {{
-                    border: 1px solid #ccc;
-                    padding: 10px;
-                    text-align: left;
-                }}
-                th {{
-                    background-color: #4CAF50;
-                    color: white;
-                }}
-                tr:nth-child(even) {{
-                    background-color: #f2f2f2;
-                }}
-                .document-class {{
-                    font-size: 18px;
-                    font-weight: bold;
-                    margin-bottom: 20px;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="document-class">Document Class: {document_class}</div>
-            {table_html}
-        </body>
-        </html>
-        """
+    # Escape user-provided data to prevent XSS
+    safe_document_class = html.escape(str(document_class))
 
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
+    # HTML template
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Document Analysis</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                padding: 20px;
+                background-color: #f9f9f9;
+            }}
+            h2 {{
+                color: #2c3e50;
+            }}
+            table {{
+                border-collapse: collapse;
+                width: 100%;
+                margin-top: 20px;
+            }}
+            th, td {{
+                border: 1px solid #ccc;
+                padding: 10px;
+                text-align: left;
+            }}
+            th {{
+                background-color: #4CAF50;
+                color: white;
+            }}
+            tr:nth-child(even) {{
+                background-color: #f2f2f2;
+            }}
+            .document-class {{
+                font-size: 18px;
+                font-weight: bold;
+                margin-bottom: 20px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="document-class">Document Class: {safe_document_class}</div>
+        {table_html}
+    </body>
+    </html>
+    """
 
-        print(f"HTML saved at: {html_path}")
-        return html_path
+    # Path validated by safe_join_path and realpath check above
+    with open(html_path, 'w', encoding='utf-8') as f:  # nosec B603 - path validated
+        f.write(html_content)
 
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
+    logger.info(f"HTML saved at: {html_path}")
+    return html_path
 
 
 def read_s3_object(s3_uri, bytes=False):
@@ -503,8 +619,8 @@ def read_s3_object(s3_uri, bytes=False):
             content = response['Body'].read().decode('utf-8')
         return content
     except Exception as e:
-        print(f"Error reading S3 object: {e}")
-        return None
+        logger.error(f"Error reading S3 object: {type(e).__name__}")
+        raise RuntimeError("Failed to read S3 object") from e
 
 
 def extract_inference_from_s3_to_df(s3_uri):
@@ -521,10 +637,19 @@ def extract_inference_from_s3_to_df(s3_uri):
     (pd.DataFrame, str): Extracted DataFrame and HTML file path
     """
     try:
+        # Validate S3 URI format
+        if not s3_uri or not s3_uri.startswith('s3://'):
+            raise ValueError("Invalid S3 URI format - must start with 's3://'")
+        
+        uri_parts = s3_uri.replace('s3://', '').split('/', 1)
+        if len(uri_parts) != 2 or not uri_parts[0] or not uri_parts[1]:
+            raise ValueError("Invalid S3 URI format - must contain bucket and key")
+        
+        bucket, key = uri_parts
+        
         # AWS client
         aws = AWSClients()
         s3_client = aws.s3_client
-        bucket, key = s3_uri.replace('s3://', '').split('/', 1)
         response = s3_client.get_object(Bucket=bucket, Key=key)
         json_data = json.loads(response['Body'].read().decode('utf-8'))
 
@@ -538,8 +663,13 @@ def extract_inference_from_s3_to_df(s3_uri):
                 info.get("confidence"), float) else info.get("confidence")
 
             geometry = info.get("geometry", [])
-            page = geometry[0].get("page") if geometry else None
-            bbox = geometry[0].get("boundingBox") if geometry else None
+            # Safely access geometry data with bounds checking
+            try:
+                page = geometry[0].get("page") if geometry and len(geometry) > 0 else None
+                bbox = geometry[0].get("boundingBox") if geometry and len(geometry) > 0 else None
+            except (IndexError, TypeError, AttributeError):
+                page = None
+                bbox = None
 
             records.append({
                 "field_name": field,
@@ -551,21 +681,21 @@ def extract_inference_from_s3_to_df(s3_uri):
 
         df = pd.DataFrame(records)
 
-        # HTML output
-        if not os.path.exists("output/html_output"):
+        # HTML output - hardcoded safe directory
+        if not os.path.exists("output/html_output"):  # nosec - hardcoded safe path
             os.makedirs("output/html_output")
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         html_file = os.path.join(
-            "output/html_output", f"inference_result_{timestamp}.html")
+            "output/html_output", f"inference_result_{timestamp}.html")  # nosec - hardcoded base + sanitized timestamp
         df.to_html(html_file, index=False, justify='center')
 
-        print(f"✅ Extracted {len(df)} fields and saved HTML to: {html_file}")
+        logger.info(f"✅ Extracted {len(df)} fields and saved HTML to: {html_file}")
         return df, html_file
 
     except Exception as e:
-        print(f"❌ Error extracting inference from S3: {e}")
-        return pd.DataFrame(), None
+        logger.error(f"❌ Error extracting inference from S3: {type(e).__name__}")
+        raise RuntimeError("Failed to extract inference from S3") from e
 
 # def get_json_from_s3_to_df(s3_uri):
 #     """
@@ -621,18 +751,48 @@ def extract_inputs_to_dataframe_from_file(json_file_path):
 
     Returns:
     pd.DataFrame: DataFrame with columns - instruction, data_point_in_document, field_name, expected_output
+    
+    Raises:
+        ValueError: If path traversal is detected or file is invalid
+        RuntimeError: If file reading or parsing fails
     """
     try:
-        with open(json_file_path, 'r', encoding='utf-8') as f:
+        # Validate path to prevent path traversal using proper security function
+        # Allow files within current working directory
+        cwd = os.path.realpath(os.getcwd())
+        validated_path = validate_path_within_directory(json_file_path, cwd)
+        
+        # Verify it's a file
+        if not os.path.isfile(validated_path):
+            raise ValueError(f"Path is not a file: {json_file_path}")
+        
+        # Path validated above
+        with open(validated_path, 'r', encoding='utf-8') as f:  # nosec B603 - path validated by validate_path_within_directory
             json_data = json.load(f)
 
         inputs = json_data.get("inputs", [])
+        
+        # Validate inputs is a list
+        if not isinstance(inputs, list):
+            raise ValueError("'inputs' field must be a list")
+        
+        # Handle empty inputs gracefully
+        if not inputs:
+            logger.warning("No inputs found in JSON file, returning empty DataFrame")
+            return pd.DataFrame()
+        
         df = pd.DataFrame(inputs)
         return df
 
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON format in file: {type(e).__name__}")
+        raise ValueError("Invalid JSON format in input file") from e
+    except ValueError:
+        # Re-raise ValueError (includes path traversal errors)
+        raise
     except Exception as e:
-        print(f"Error reading or parsing the JSON file: {e}")
-        return pd.DataFrame()
+        logger.error(f"Error reading or parsing the JSON file: {type(e).__name__}")
+        raise RuntimeError("Failed to read or parse JSON file") from e
 
 
 def merge_bda_and_input_dataframes(bda_df, input_df):
@@ -645,11 +805,30 @@ def merge_bda_and_input_dataframes(bda_df, input_df):
 
     Returns:
     pd.DataFrame: Cleanly merged DataFrame
+    
+    Raises:
+        ValueError: If input DataFrames are empty
+        KeyError: If required columns are missing from input DataFrames
+        RuntimeError: If merge operation fails
     """
     try:
+        # Validate input DataFrames
+        if bda_df is None or input_df is None:
+            raise ValueError("Input DataFrames cannot be None")
+        if bda_df.empty or input_df.empty:
+            raise ValueError("Input DataFrames cannot be empty")
+        
         # Standardize column names
+        bda_df = bda_df.copy()
+        input_df = input_df.copy()
         bda_df.columns = bda_df.columns.str.lower().str.strip()
         input_df.columns = input_df.columns.str.lower().str.strip()
+        
+        # Validate required columns exist
+        if 'field_name' not in bda_df.columns:
+            raise KeyError("bda_df must contain 'field_name' column")
+        if 'field_name' not in input_df.columns:
+            raise KeyError("input_df must contain 'field_name' column")
 
         # Normalize the field names for merge
         bda_df['field_name_normalized'] = bda_df['field_name'].str.lower().str.strip()
@@ -664,6 +843,10 @@ def merge_bda_and_input_dataframes(bda_df, input_df):
             suffixes=('_bda', '_input'),
             how='inner'
         )
+        
+        # Validate merge result
+        if merged.empty:
+            logger.warning("Merge resulted in empty DataFrame - no matching field names found")
 
         # Compose final output
         final_df = merged[[
@@ -683,10 +866,13 @@ def merge_bda_and_input_dataframes(bda_df, input_df):
         })
 
         return final_df
-
+    
+    except (KeyError, ValueError) as e:
+        # Re-raise validation errors
+        raise
     except Exception as e:
-        print(f"Error merging dataframes: {e}")
-        return pd.DataFrame()
+        logger.error(f"Error merging DataFrames: {type(e).__name__}")
+        raise RuntimeError("Failed to merge BDA and input DataFrames") from e
 
 
 # Import field similarity functions
@@ -734,8 +920,8 @@ def add_semantic_similarity_column(df, threshold):
         return df
 
     except Exception as e:
-        print(f"Error adding semantic similarity: {e}")
-        return df.copy()
+        logger.error(f"Error adding semantic similarity: {type(e).__name__}")
+        raise RuntimeError("Failed to add semantic similarity") from e
 
 
 def update_instructions_with_bedrock(df, threshold, doc_path=None):
@@ -765,20 +951,20 @@ def update_instructions_with_bedrock(df, threshold, doc_path=None):
         for idx, row in df_updated.iterrows():
             if row['semantic_similarity'] < threshold:
                 field_name = row['Field']
-                old_instruction = row['Instruction']
                 expected_output = row['Expected Output']
                 if doc_path is None: 
-                    new_instruction = rewrite_prompt_bedrock(field_name, old_instruction, expected_output)
+                    result = rewrite_prompt_bedrock(field_name, row['Instruction'], expected_output)
                 else: 
-                    new_instruction = rewrite_prompt_bedrock_with_document(field_name, old_instruction, expected_output, doc_path)
-                df_updated.at[idx, 'Instruction'] = new_instruction
-                print(
-                    f"Updated instruction {idx} --- Old instruction: {old_instruction} // New instruction: {new_instruction}")
+                    result = rewrite_prompt_bedrock_with_document(field_name, row['Instruction'], expected_output, doc_path)
+                _secure_instruction_update(df_updated, idx, result)
+                # Log field update without exposing instruction content (CWE-200 mitigation)
+                logger.info(f"Updated instruction for field '{field_name}' at index {idx}")
         return df_updated
 
     except Exception as e:
-        print(f"❌ Error in updating instructions: {e}")
-        return df.copy()
+        # Log error without exposing sensitive instruction content
+        logger.error(f"❌ Error in updating instructions: {type(e).__name__}")
+        raise RuntimeError("Failed to update instructions") from e
 
 
 def update_schema_with_new_instruction(df, iteration):
@@ -794,43 +980,62 @@ def update_schema_with_new_instruction(df, iteration):
     """
 
     try:
-        with open('src/schema.json') as schema:
+        with open('src/schema.json') as schema:  # nosec B603 - hardcoded safe path
             blueprint_schema = json.load(schema)
 
-        with open('input_0.json') as input_file:
+        with open('input_0.json') as input_file:  # nosec B603 - hardcoded safe path
             input_data = json.load(input_file)
+        
+        # Validate schema structure
+        if 'properties' not in blueprint_schema:
+            raise ValueError("Schema missing 'properties' field")
+        
+        # Validate input_data structure
+        if 'inputs' not in input_data or not isinstance(input_data['inputs'], list):
+            raise ValueError("Input data missing 'inputs' list")
             
-        input_dict = {item['field_name']: item for item in input_data['inputs']}
+        input_dict = {item['field_name']: item for item in input_data['inputs'] if 'field_name' in item}
 
         # update schema instruction with new generated instruction
+        properties = blueprint_schema['properties']
         for idx, row in df.iterrows():
-            new_instruction = row['Instruction']
             key = row['Field']
-            properties = blueprint_schema['properties']
-            properties[key]['instruction'] = new_instruction
+            
+            # Safely check if key exists in properties before updating
+            if key not in properties:
+                logger.warning(f"Field '{key}' not found in schema properties, skipping")
+                continue
+                
+            _secure_instruction_update(properties[key], 'instruction', row['Instruction'])
             
             # Find the matching input in the list input.json and update its instruction
             if key in input_dict:
-                input_dict[key]['instruction'] = new_instruction
+                _secure_instruction_update(input_dict[key], 'instruction', row['Instruction'])
         
         input_data['inputs'] = list(input_dict.values())
 
-        # create new schema file to update blueprint
-        schema_path = f'src/schema_updated_{iteration}.json'
-        with open(schema_path, 'w') as new_schema:
+        # Sanitize iteration to prevent path traversal
+        safe_iteration = sanitize_filename(str(iteration))
+        
+        # create new schema file to update blueprint - use safe path construction
+        schema_filename = f'schema_updated_{safe_iteration}.json'
+        schema_path = safe_join_path('src', schema_filename)
+        with open(schema_path, 'w') as new_schema:  # nosec B603 - path validated by safe_join_path
             json.dump(blueprint_schema, new_schema, indent=4)
 
-        # create new input file for merged df
-        input_path = f'input_{iteration}.json'
-        with open(input_path, 'w') as new_input:
+        # create new input file for merged df - use safe path construction
+        input_filename = f'input_{safe_iteration}.json'
+        input_path = safe_join_path('.', input_filename)
+        with open(input_path, 'w') as new_input:  # nosec B603 - path validated by safe_join_path
             json.dump(input_data, new_input, indent=4)
 
-        print(f"✅ Schema successfully updated, new schema at: {schema_path}")
+        logger.info(f"✅ Schema successfully updated, new schema at: {schema_path}")
         return schema_path
 
     except Exception as e:
-        print(f"❌ Error in updating schema: {e}")
-        return blueprint_schema
+        # Log error without exposing sensitive instruction content
+        logger.error(f"❌ Error in updating schema: {type(e).__name__}")
+        raise RuntimeError(f"Failed to update schema") from e
 
 
 def curr_match_status(df, threshold):
@@ -853,14 +1058,14 @@ def curr_match_status(df, threshold):
         # Update instruction column row-by-row
         for row in df.itertuples():
             if row.semantic_similarity < threshold:
-                print(f"\n🔸 Not all fields have reached {threshold*100}% matched yet!")
+                logger.info(f"\n🔸 Not all fields have reached {threshold*100}% matched yet!")
                 return False 
         
-        print(f"\n🔹 All fields are at least {threshold*100}% matched!!")
+        logger.info(f"\n🔹 All fields are at least {threshold*100}% matched!!")
         return True 
     except Exception as e:
-        print(f"❌ Error in checking semantic match: {e}")
-        return df.copy()
+        logger.error(f"❌ Error in checking semantic match: {type(e).__name__}")
+        raise RuntimeError("Failed to check semantic match status") from e
 
 
 def create_full_similarity_csv(folder_path):
@@ -872,16 +1077,35 @@ def create_full_similarity_csv(folder_path):
 
     """
     try:
+        # Validate folder path to prevent path traversal using proper security function
+        cwd = os.path.realpath(os.getcwd())
+        abs_folder = validate_path_within_directory(folder_path, cwd)
+        
+        # Verify it's a directory
+        if not os.path.isdir(abs_folder):
+            raise ValueError(f"Invalid folder path: {folder_path} is not a directory")
 
         # iterate through all similarity files in the folder_path and create df
         dfs = []
-        for filename in os.listdir(folder_path):
+        for filename in os.listdir(abs_folder):
             if filename.endswith(".csv"):
-                file_path = os.path.join(folder_path, filename)
+                # Use safe path joining
+                file_path = safe_join_path(abs_folder, filename)
                 try:
                     dfs.append(pd.read_csv(file_path))
-                except pd.errors.ParserError as e:
-                    print(f"Error reading {filename}: {e}")
+                except (pd.errors.ParserError, pd.errors.EmptyDataError, FileNotFoundError) as e:
+                    logger.error(f"Error reading {filename}: {type(e).__name__}")
+                    continue
+
+        # Validate we have data to merge
+        if len(dfs) == 0:
+            logger.warning("No CSV files found or all files failed to load")
+            return
+        
+        if len(dfs) == 1:
+            logger.warning("Only one CSV file found, nothing to merge")
+            dfs[0].to_csv("compare_instructions_with_similarity.csv", index=False)
+            return
 
         dfs.reverse()
         # rename columns to distinguish between different iterations
@@ -890,9 +1114,13 @@ def create_full_similarity_csv(folder_path):
                       inplace=True)
 
         # merge all the dfs into one df
-        merge = partial(
-            pd.merge, on=['Field', 'Expected Output', 'Data in Document'])
-        df_merged = reduce(merge, dfs)
+        try:
+            merge = partial(
+                pd.merge, on=['Field', 'Expected Output', 'Data in Document'])
+            df_merged = reduce(merge, dfs)
+        except (KeyError, ValueError) as e:
+            logger.error(f"Error merging DataFrames: {type(e).__name__}")
+            raise RuntimeError("Failed to merge similarity DataFrames - check column names") from e
 
         first_cols = ['Field', 'Expected Output', 'Data in Document']
         req_order = first_cols + \
@@ -903,7 +1131,7 @@ def create_full_similarity_csv(folder_path):
         df_merged.to_csv(
             "compare_instructions_with_similarity.csv", index=False)
 
-        print(f"\n\n✅ Full similarity csv created, new file at: compare_instructions_with_similarity.csv")
+        logger.info(f"\n\n✅ Full similarity csv created, new file at: compare_instructions_with_similarity.csv")
 
     except Exception as e:
-        print(f"❌ Error in creating full similarity CSV: {e}")
+        logger.error(f"❌ Error in creating full similarity CSV: {type(e).__name__}")

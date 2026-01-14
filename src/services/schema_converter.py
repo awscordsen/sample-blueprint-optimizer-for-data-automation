@@ -24,7 +24,13 @@ class SchemaFlattener:
             Tuple containing:
             - Flattened schema with dot-notation field names
             - Mapping of flat paths to original nested paths for reconstruction
+            
+        Raises:
+            ValueError: If nested_schema is None or not a dictionary
         """
+        if nested_schema is None or not isinstance(nested_schema, dict):
+            raise ValueError("nested_schema must be a non-null dictionary")
+        
         if not self.is_nested_schema(nested_schema):
             # Return as-is if not nested
             return nested_schema, {}
@@ -66,7 +72,19 @@ class SchemaFlattener:
         return self._has_nested_properties(schema["properties"])
     
     def _has_nested_properties(self, properties: Dict[str, Any]) -> bool:
-        """Check if properties contain nested structures."""
+        """
+        Check if properties contain nested structures.
+        
+        Args:
+            properties: Dictionary of property definitions to check
+            
+        Returns:
+            True if properties contain nested structures, False otherwise
+        """
+        # Input validation - return False if properties is None or not a dictionary
+        if properties is None or not isinstance(properties, dict):
+            return False
+        
         for prop_name, prop_def in properties.items():
             if isinstance(prop_def, dict):
                 prop_type = prop_def.get("type", "")

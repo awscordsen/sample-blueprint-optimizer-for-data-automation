@@ -141,7 +141,10 @@ def cleanup():
             try:
                 # Remove all files in the directory
                 for file_path in glob.glob(f"{dir_path}/*"):
-                    os.remove(file_path)
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
                 print(f"  ✓ Cleaned {dir_path}")
             except Exception as e:
                 print(f"  ✗ Failed to clean {dir_path}: {e}")

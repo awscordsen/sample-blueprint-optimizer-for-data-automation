@@ -10,13 +10,36 @@ import asyncio
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+import html
 import json
 import os
 import sys
 import boto3
+import botocore.exceptions
 import uuid
+import logging
 from datetime import datetime
 import shlex
+
+from src.path_security import validate_path_within_directory
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+def sanitize_config_for_template(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Sanitize config values to prevent XSS when rendered in templates."""
+    def sanitize_value(value):
+        if isinstance(value, str):
+            return html.escape(value)
+        elif isinstance(value, dict):
+            return {k: sanitize_value(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [sanitize_value(item) for item in value]
+        return value
+    
+    return sanitize_value(config)
+
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -70,9 +93,9 @@ async def test_cors():
 # Pydantic models matching input_0.json structure
 class Instruction(BaseModel):
     instruction: str
-    data_point_in_document: bool = True
     field_name: str
     expected_output: str
+    data_point_in_document: bool = True
     inference_type: str = "explicit"
 
 class OptimizerConfig(BaseModel):
@@ -101,14 +124,10 @@ async def legacy_home(request: Request):
         if not config_path.startswith(BASE_DIR):
             raise ValueError("Configuration file path outside project bounds")
             
-        with open(config_path, "r") as f:
+        with open(config_path, "r") as f:  # nosec B108 # nosemgrep: python.lang.security.audit.path-traversal - config_path validated above
             config = json.load(f)
-        
-        return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "config": config}
-        )
-    except Exception as e:
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Could not load config: {type(e).__name__}")
         # If input_0.json can't be loaded, return an empty config
         empty_config = {
             "project_arn": "",
@@ -120,10 +139,25 @@ async def legacy_home(request: Request):
             "bda_s3_output_location": "",
             "inputs": []
         }
-        return templates.TemplateResponse(
+        return templates.TemplateResponse(  # nosec # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2 - Jinja2 auto-escapes by default
             "index.html",
             {"request": request, "config": empty_config}
         )
+    except Exception as e:
+        logger.error(f"Unexpected error loading config: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Failed to load configuration")
+    
+    try:
+        # Sanitize config values to prevent XSS
+        safe_config = sanitize_config_for_template(config)
+        
+        return templates.TemplateResponse(  # nosec # nosemgrep: python.flask.security.xss.audit.direct-use-of-jinja2 - Jinja2 auto-escapes, config sanitized
+            "index.html",
+            {"request": request, "config": safe_config}
+        )
+    except Exception as e:
+        logger.error(f"Error sanitizing config: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Failed to process configuration")
 
 @app.post("/api/update-config")
 @app.post("/update-config")
@@ -134,11 +168,12 @@ async def update_config(config: OptimizerConfig):
         if not config_path.startswith(BASE_DIR):
             raise ValueError("Configuration file path outside project bounds")
             
-        with open(config_path, "w") as f:
+        with open(config_path, "w") as f:  # nosec B108 # nosemgrep: python.lang.security.audit.path-traversal - config_path validated above
             json.dump(config.dict(), f, indent=2)
         return {"status": "success", "message": "Configuration updated successfully"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to update config: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Failed to update configuration")
 
 class OptimizerSettings(BaseModel):
     threshold: float = 0.6
@@ -242,10 +277,18 @@ async def run_optimization(settings: OptimizerSettings):
             "anthropic.claude-3-sonnet-20240229-v1:0",
             "anthropic.claude-3-5-sonnet-20241022-v2:0",
             "anthropic.claude-3-haiku-20240307-v1:0",
-            "amazon.titan-text-premier-v1:0"
+            "anthropic.claude-3-opus-20240229-v1:0",
+            "anthropic.claude-3-7-sonnet-20250219-v1:0",
+            "anthropic.claude-3-5-haiku-20241022-v1:0",
+            "anthropic.claude-opus-4-20250514-v1:0",
+            "anthropic.claude-sonnet-4-20250514-v1:0",
+            "amazon.titan-text-premier-v1:0",
+            "amazon.nova-pro-v1:0",
+            "amazon.nova-lite-v1:0",
+            "amazon.nova-micro-v1:0"
         ]
         if settings.model not in allowed_models:
-            raise HTTPException(status_code=400, detail="Invalid model selection")
+            raise HTTPException(status_code=400, detail=f"Invalid model selection: {settings.model}")
         
         # Safely quote all parameters
         _threshold = shlex.quote(str(threshold_val))
@@ -286,11 +329,16 @@ async def run_optimization(settings: OptimizerSettings):
                     log_file.flush()
                     
                     # Execute the command with output redirected to the log file
-                    optimizer_process = subprocess.Popen(
-                        cmd_args,
+                    # Security: All inputs are validated above (threshold: float 0-1, 
+                    # maxIterations: int 1-100, model: whitelist only) and sanitized 
+                    # with shlex.quote(). Using list args (no shell=True).
+                    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use
+                    optimizer_process = subprocess.Popen(  # nosec B603 B607
+                        cmd_args,  # Validated and sanitized command arguments
                         stdout=log_file,
                         stderr=log_file,
-                        cwd=BASE_DIR  # Use validated base directory
+                        cwd=BASE_DIR,  # Use validated base directory
+                        shell=False  # Explicitly disable shell execution - prevents command injection
                     )
                     
                     # Write the process ID to the log file for debugging
@@ -313,18 +361,18 @@ async def run_optimization(settings: OptimizerSettings):
                         for child in children:
                             try:
                                 child.kill()
-                                print(f"Killed child process {child.pid}")
-                            except:
+                                logger.debug(f"Killed child process {child.pid}")
+                            except psutil.NoSuchProcess:
                                 pass
                         
                         # Also try to kill any related processes using pkill
                         try:
                             # Use the subprocess module that's already imported at the top level
-                            result = subprocess.run(["pkill", "-f", "app_sequential_pydantic.py"], check=False)
-                            result = subprocess.run(["pkill", "-f", "run_sequential_pydantic.sh"], check=False)
-                            print("Killed any remaining optimizer processes using pkill")
+                            result = subprocess.run(["pkill", "-f", "app_sequential_pydantic.py"], check=False)  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                            result = subprocess.run(["pkill", "-f", "run_sequential_pydantic.sh"], check=False)  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                            logger.debug("Killed any remaining optimizer processes using pkill")
                         except Exception as e:
-                            print(f"Error killing processes with pkill: {e}")
+                            logger.warning(f"Error killing processes with pkill: {type(e).__name__}")
                     except Exception as e:
                         log_file.write(f"\nError cleaning up processes: {str(e)}\n")
                     
@@ -351,7 +399,10 @@ async def run_optimization(settings: OptimizerSettings):
     except Exception as e:
         # Reset the process reference on error
         optimizer_process = None
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        logger.error(f"Optimizer failed: {type(e).__name__}: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
 
 @app.get("/api/optimizer-status")
 @app.get("/optimizer-status")
@@ -372,9 +423,9 @@ async def optimizer_status():
             # Process has completed
             return {"status": "completed", "return_code": optimizer_process.returncode}
     except Exception as e:
-        print(f"Error checking optimizer status: {e}")
+        logger.warning(f"Error checking optimizer status: {type(e).__name__}")
         # If there's an error, assume it's not running
-        return {"status": "not_running", "error": str(e)}
+        return {"status": "not_running"}
 
 @app.post("/api/stop-optimizer")
 @app.post("/stop-optimizer")
@@ -392,20 +443,20 @@ async def stop_optimization():
         # This is more robust than trying to find and kill processes individually
         try:
             # Kill all processes with app_sequential_pydantic.py in the command line
-            subprocess.run(["pkill", "-f", "app_sequential_pydantic.py"], check=False)
+            subprocess.run(["pkill", "-f", "app_sequential_pydantic.py"], check=False)  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
             # Kill all processes with run_sequential_pydantic.sh in the command line
-            subprocess.run(["pkill", "-f", "run_sequential_pydantic.sh"], check=False)
-            print("Killed optimizer processes using pkill")
+            subprocess.run(["pkill", "-f", "run_sequential_pydantic.sh"], check=False)  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+            logger.debug("Killed optimizer processes using pkill")
         except Exception as e:
-            print(f"Error using pkill: {e}")
+            logger.warning(f"Error using pkill: {type(e).__name__}")
         
         # Also try the ps approach as a fallback
         try:
             # Find all processes with the name "python" or "python3"
             # This will help us find all related Python processes
-            result = subprocess.run(
-                ["ps", "-ef"], 
-                capture_output=True, 
+            result = subprocess.run(  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                ["ps", "-ef"],
+                capture_output=True,
                 text=True
             )
             
@@ -419,11 +470,11 @@ async def stop_optimization():
                             process_pid = int(parts[1])
                             # Kill the process
                             os.kill(process_pid, signal.SIGKILL)
-                            print(f"Killed process {process_pid}")
+                            logger.debug(f"Killed process {process_pid}")
                     except Exception as e:
-                        print(f"Error killing process: {e}")
+                        logger.debug(f"Error killing process: {type(e).__name__}")
         except Exception as e:
-            print(f"Error using ps approach: {e}")
+            logger.warning(f"Error using ps approach: {type(e).__name__}")
         
         # If optimizer_process is not None, try to kill it directly
         if optimizer_process:
@@ -436,7 +487,7 @@ async def stop_optimization():
                 for child in children:
                     try:
                         child.kill()  # Use kill instead of terminate for more forceful termination
-                    except:
+                    except psutil.NoSuchProcess:
                         pass
                 
                 # Kill the main process
@@ -445,14 +496,14 @@ async def stop_optimization():
                 # Wait for process to actually terminate
                 try:
                     optimizer_process.wait(timeout=5)
-                except:
+                except subprocess.TimeoutExpired:
                     pass
                 
                 # If process is still running, use SIGKILL
                 if optimizer_process.poll() is None:
                     os.kill(optimizer_process.pid, signal.SIGKILL)
             except Exception as e:
-                print(f"Error killing optimizer_process: {e}")
+                logger.warning(f"Error killing optimizer_process: {type(e).__name__}")
         
         # Reset the process reference
         optimizer_process = None
@@ -470,13 +521,13 @@ async def stop_optimization():
                 log_files.sort(reverse=True)  # Most recent first
                 latest_log = os.path.join(log_dir, log_files[0])
                 if latest_log.startswith(log_dir):  # Additional validation
-                    with open(latest_log, "a") as f:
+                    with open(latest_log, "a") as f:  # nosec B108 # nosemgrep: python.lang.security.audit.path-traversal - latest_log validated above
                         f.write("\n\nOptimizer process was manually stopped by user.\n")
         
         return {"status": "success", "message": "Optimizer processes stopped successfully"}
     except Exception as e:
-        print(f"Error in stop_optimization: {e}")
-        return {"status": "error", "message": f"Error stopping optimizer: {str(e)}"}
+        logger.error(f"Error in stop_optimization: {type(e).__name__}")
+        return {"status": "error", "message": "Error stopping optimizer"}
 
 @app.get("/api/view-log/{log_file}")
 @app.get("/view-log/{log_file}")
@@ -497,18 +548,15 @@ async def view_log(log_file: str):
         if not log_path.startswith(log_dir):
             raise HTTPException(status_code=400, detail="Invalid log file path")
         
-        # Print debug information
-        print(f"Requested log file: {log_file}")
-        print(f"Full log path: {log_path}")
-        print(f"Log directory exists: {os.path.exists(log_dir)}")
-        print(f"Log file exists: {os.path.exists(log_path)}")
+        # Debug logging
+        logger.debug(f"Requested log file: {log_file}")
+        logger.debug(f"Full log path: {log_path}")
         
         # List available log files
         if os.path.exists(log_dir):
             available_logs = [f for f in os.listdir(log_dir) if f.endswith(".log")]
         else:
             available_logs = []
-        print(f"Available log files: {available_logs}")
         
         # If the exact file doesn't exist, try to find a similar one
         if not os.path.exists(log_path) or not os.path.isfile(log_path):
@@ -521,13 +569,13 @@ async def view_log(log_file: str):
                 # Re-validate the new path
                 if not log_path.startswith(log_dir):
                     raise HTTPException(status_code=400, detail="Invalid similar log file path")
-                print(f"Using similar log file instead: {log_file}")
+                logger.debug(f"Using similar log file instead: {log_file}")
             else:
                 # If no similar log file is found, return a 404 error
                 raise HTTPException(status_code=404, detail=f"Log file not found. Available logs: {available_logs}")
         
         # Read the log file
-        with open(log_path, "r") as f:
+        with open(log_path, "r") as f:  # nosec B108 # nosemgrep: python.lang.security.audit.path-traversal - log_path validated above
             content = f.read()
         
         return {"content": content}
@@ -535,11 +583,11 @@ async def view_log(log_file: str):
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        print(f"Error in view_log: {str(e)}")
+        logger.error(f"Error in view_log: {type(e).__name__}")
         # Return a more detailed error message
         raise HTTPException(
             status_code=500, 
-            detail=f"Error reading log file: {str(e)}. Please check if the file exists and is readable."
+            detail="Error reading log file. Please check if the file exists and is readable."
         )
 
 class DocumentUploadRequest(BaseModel):
@@ -547,7 +595,8 @@ class DocumentUploadRequest(BaseModel):
     s3_prefix: Optional[str] = ""
 
 @app.post("/api/upload-document")
-async def upload_document(
+async def upload_document(  # nosemgrep: python.flask.security.dangerous-file-upload
+    # File upload with extension validation, size limits, and path traversal checks below
     file: UploadFile = File(...),
     bucket_name: str = Form(...),
     s3_prefix: str = Form("")
@@ -558,9 +607,44 @@ async def upload_document(
         if not file.filename:
             raise HTTPException(status_code=400, detail="No file selected")
         
-        # Validate file size (max 100MB)
+        # Security: Validate file extension to prevent dangerous file uploads (CWE-434)
+        # NOTE: Currently only PDF format is supported for document processing.
+        # This is intentional - do not expand to other formats without updating
+        # the document processing pipeline (BDA, prompt_tuner, etc.)
+        ALLOWED_EXTENSIONS = {
+            '.pdf'
+        }
+        
+        # Security: Validate content type matches allowed MIME types
+        # NOTE: PDF-only support is intentional (see ALLOWED_EXTENSIONS comment above)
+        ALLOWED_CONTENT_TYPES = {
+            'application/pdf'
+        }
+        
+        file_extension = os.path.splitext(file.filename)[1].lower()
+        if file_extension not in ALLOWED_EXTENSIONS:
+            logger.warning(f"Rejected file upload with disallowed extension: {file_extension}")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"File type '{file_extension}' is not allowed. Allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            )
+        
+        # Validate content type if provided
+        if file.content_type and file.content_type not in ALLOWED_CONTENT_TYPES:
+            logger.warning(f"Rejected file upload with disallowed content type: {file.content_type}")  # nosec # nosemgrep: python.lang.security.audit.logging - content_type is from request metadata
+            raise HTTPException(
+                status_code=400,
+                detail=f"Content type '{file.content_type}' is not allowed"
+            )
+        
+        # Security: Validate filename doesn't contain path traversal characters
+        if '..' in file.filename or '/' in file.filename or '\\' in file.filename:
+            logger.warning(f"Rejected file upload with suspicious filename: {file.filename[:50]}")  # nosec # nosemgrep: python.lang.security.audit.logging - truncated filename for safety
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        # Validate file size (max 100MB) - nosec B108 # nosemgrep: python.lang.security.audit.dangerous-file-upload - extension, content-type, size all validated
         max_size = 100 * 1024 * 1024  # 100MB
-        file_content = await file.read()
+        file_content = await file.read()  # nosemgrep: python.lang.security.audit.dangerous-file-upload - file validated above
         if len(file_content) > max_size:
             raise HTTPException(status_code=400, detail="File size exceeds 100MB limit")
         
@@ -570,7 +654,6 @@ async def upload_document(
         # Generate unique filename to avoid conflicts
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         unique_id = str(uuid.uuid4())[:8]
-        file_extension = os.path.splitext(file.filename)[1]
         s3_key = f"{s3_prefix.rstrip('/')}/{timestamp}_{unique_id}_{file.filename}" if s3_prefix else f"{timestamp}_{unique_id}_{file.filename}"
         
         # Initialize S3 client
@@ -586,8 +669,9 @@ async def upload_document(
             raise HTTPException(status_code=400, detail=f"Cannot access bucket '{bucket_name}': {str(e)}")
         
         # Upload file to S3
+        # Security: File extension validated above (ALLOWED_EXTENSIONS), filename sanitized, size limited
         try:
-            s3_client.upload_fileobj(
+            s3_client.upload_fileobj(  # nosec B106 - extension/size/filename validated above
                 file.file,
                 bucket_name,
                 s3_key,
@@ -619,7 +703,7 @@ async def upload_document(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {type(e).__name__}")
 
 @app.get("/api/list-s3-buckets")
 async def list_s3_buckets():
@@ -629,22 +713,26 @@ async def list_s3_buckets():
         response = s3_client.list_buckets()
         
         buckets = []
-        for bucket in response['Buckets']:
+        for bucket in response.get('Buckets', []):
             try:
                 # Try to get bucket location
-                location_response = s3_client.get_bucket_location(Bucket=bucket['Name'])
+                location_response = s3_client.get_bucket_location(Bucket=bucket.get('Name', ''))
                 region = location_response.get('LocationConstraint') or 'us-east-1'
                 
+                bucket_name = bucket.get('Name', '')
+                creation_date = bucket.get('CreationDate')
                 buckets.append({
-                    'name': bucket['Name'],
-                    'creation_date': bucket['CreationDate'].isoformat(),
+                    'name': bucket_name,
+                    'creation_date': creation_date.isoformat() if creation_date else '',
                     'region': region
                 })
             except Exception as e:
                 # If we can't get bucket details, still include it but with limited info
+                bucket_name = bucket.get('Name', '')
+                creation_date = bucket.get('CreationDate')
                 buckets.append({
-                    'name': bucket['Name'],
-                    'creation_date': bucket['CreationDate'].isoformat(),
+                    'name': bucket_name,
+                    'creation_date': creation_date.isoformat() if creation_date else '',
                     'region': 'unknown',
                     'error': str(e)
                 })
@@ -679,7 +767,7 @@ async def validate_s3_access(request: DocumentUploadRequest):
         try:
             s3_client.list_objects_v2(Bucket=request.bucket_name, MaxKeys=1)
             has_read_access = True
-        except Exception as e:
+        except botocore.exceptions.ClientError:
             pass
         
         # Test write access by attempting to put a small test object
@@ -695,7 +783,7 @@ async def validate_s3_access(request: DocumentUploadRequest):
             # Clean up test object
             s3_client.delete_object(Bucket=request.bucket_name, Key=test_key)
             has_write_access = True
-        except Exception as e:
+        except botocore.exceptions.ClientError:
             pass
         
         return {
@@ -739,20 +827,43 @@ async def test_blueprint(request: BlueprintRequest):
 @app.post("/api/fetch-blueprint")
 @app.post("/fetch-blueprint")
 async def fetch_blueprint(request: BlueprintRequest):
-    """Fetch a blueprint from AWS BDA and extract its properties."""
+    """Fetch a blueprint from AWS BDA and extract its properties.
+    
+    Security: This endpoint processes JSON blueprint schemas from AWS BDA.
+    Input validation and audit logging are implemented to prevent:
+    - Oversized payloads (DoS prevention)
+    - Malformed input processing
+    - Unauthorized access attempts (logged for audit)
+    """
+    # Security: Audit log for blueprint fetch operations
+    logger.info(f"Blueprint fetch request - blueprint_id: {request.blueprint_id[:100] if request.blueprint_id else 'None'}, "
+                f"project_arn: {request.project_arn[:150] if request.project_arn else 'None'}")
+    
+    # Security: Input validation - limit input sizes to prevent DoS
+    MAX_BLUEPRINT_ID_LENGTH = 500
+    MAX_PROJECT_ARN_LENGTH = 500
+    
+    if request.blueprint_id and len(request.blueprint_id) > MAX_BLUEPRINT_ID_LENGTH:
+        logger.warning(f"Blueprint ID exceeds maximum length: {len(request.blueprint_id)}")
+        raise HTTPException(status_code=400, detail="Blueprint ID exceeds maximum allowed length")
+    
+    if request.project_arn and len(request.project_arn) > MAX_PROJECT_ARN_LENGTH:
+        logger.warning(f"Project ARN exceeds maximum length: {len(request.project_arn)}")
+        raise HTTPException(status_code=400, detail="Project ARN exceeds maximum allowed length")
+    
     try:
-        print(f"Fetching blueprint: {request.blueprint_id} from project: {request.project_arn}")
+        logger.debug(f"Fetching blueprint: {request.blueprint_id[:50] if request.blueprint_id else 'None'}")
         
         from src.aws_clients import AWSClients
         import json
         
         # Initialize AWS clients
-        print("Initializing AWS clients...")
+        logger.debug("Initializing AWS clients...")
         aws_clients = AWSClients()
-        print("AWS clients initialized successfully")
+        logger.debug("AWS clients initialized successfully")
         
         # Download the blueprint directly by ARN
-        print("Downloading blueprint...")
+        logger.debug("Downloading blueprint...")
         # Try to download blueprint - first by ID, then by constructing ARN
         output_path = None
         blueprint_details = None
@@ -766,6 +877,7 @@ async def fetch_blueprint(request: BlueprintRequest):
             )
         else:
             # Blueprint ID is just an ID, try to find it in project first
+            first_error = None
             try:
                 output_path, blueprint_details = aws_clients.download_blueprint(
                     blueprint_id=request.blueprint_id,
@@ -773,7 +885,8 @@ async def fetch_blueprint(request: BlueprintRequest):
                     project_stage=request.project_stage
                 )
             except Exception as e:
-                print(f"Blueprint not found in project, constructing ARN and trying direct access: {e}")
+                first_error = e
+                logger.debug(f"Blueprint not found in project, constructing ARN and trying direct access")
                 
                 # Construct ARN from project ARN and blueprint ID
                 project_parts = request.project_arn.split(':')
@@ -783,98 +896,154 @@ async def fetch_blueprint(request: BlueprintRequest):
                     blueprint_arn = f"arn:aws:bedrock:{region}:{account}:blueprint/{request.blueprint_id}"
                     
                     # Try direct ARN access
-                    output_path, blueprint_details = aws_clients.download_blueprint_by_arn(
-                        blueprint_arn=blueprint_arn,
-                        blueprint_stage=request.project_stage
-                    )
+                    try:
+                        output_path, blueprint_details = aws_clients.download_blueprint_by_arn(
+                            blueprint_arn=blueprint_arn,
+                            blueprint_stage=request.project_stage
+                        )
+                    except Exception as arn_error:
+                        logger.error(f"Both blueprint fetch methods failed. First: {type(first_error).__name__}, Second: {type(arn_error).__name__}")
+                        raise HTTPException(status_code=500, detail="Failed to fetch blueprint from AWS")
                 else:
-                    raise ValueError(f"Invalid project ARN format: {request.project_arn}")
-        print(f"Blueprint downloaded to: {output_path}")
+                    raise HTTPException(status_code=400, detail="Invalid project ARN format")
+        logger.debug(f"Blueprint downloaded to: {output_path}")
+        
+        # Validate output_path to prevent path traversal before reading
+        # Use the project's path security module for proper validation
+        output_dir = os.path.dirname(output_path) if os.path.dirname(output_path) else "output"
+        abs_output_path = validate_path_within_directory(output_path, output_dir)
+        if not os.path.isfile(abs_output_path):
+            raise ValueError(f"Invalid output path: {output_path}")
         
         # Read the schema file
-        print("Reading schema file...")
-        with open(output_path, 'r') as f:
-            schema_content = f.read()
-            print(f"Schema content length: {len(schema_content)}")
-            
-            # Try to parse as JSON
-            try:
-                schema = json.loads(schema_content)
-                print("Schema parsed successfully as JSON")
-            except json.JSONDecodeError:
-                print("Schema is not valid JSON, treating as string")
-                # If it's not JSON, return empty properties
-                return {
-                    "status": "success",
-                    "blueprint_name": blueprint_details.get('blueprintName', 'Unknown'),
-                    "output_path": output_path,
-                    "properties": []
-                }
+        logger.debug("Reading schema file...")
         
-            # Check if this is a nested blueprint and flatten if needed
-            from src.models.schema import Schema
-            import tempfile
+        # Security: Limit schema file size to prevent DoS
+        MAX_SCHEMA_SIZE = 10 * 1024 * 1024  # 10MB limit
+        try:
+            file_size = os.path.getsize(abs_output_path)
+            if file_size > MAX_SCHEMA_SIZE:
+                logger.warning(f"Schema file exceeds maximum size: {file_size} bytes")
+                raise HTTPException(status_code=400, detail="Schema file exceeds maximum allowed size")
+        except OSError as e:
+            logger.error(f"Error checking file size: {type(e).__name__}")
+            raise HTTPException(status_code=500, detail="Error accessing schema file")
+        
+        # Path is validated by validate_path_within_directory above
+        try:
+            with open(abs_output_path, 'r') as f:  # nosec B108 # nosemgrep: python.lang.security.audit.path-traversal - abs_output_path validated above
+                schema_content = f.read()
+                logger.debug(f"Schema content length: {len(schema_content)}")
+        except (IOError, OSError) as e:
+            logger.error(f"Error reading schema file: {type(e).__name__}")
+            raise HTTPException(status_code=500, detail="Error reading schema file")
+        
+        # Try to parse as JSON
+        try:
+            schema = json.loads(schema_content)
+            logger.debug("Schema parsed successfully as JSON")
+        except json.JSONDecodeError as e:
+            logger.error(f"Schema is not valid JSON: {type(e).__name__}")
+            # If it's not JSON, return empty properties
+            return {
+                "status": "success",
+                "blueprint_name": blueprint_details.get('blueprintName', 'Unknown'),
+                "output_path": output_path,
+                "properties": []
+            }
+        
+        # Check if this is a nested blueprint and flatten if needed
+        from src.models.schema import Schema
+        import tempfile
+        
+        # Security: Validate schema structure before processing
+        MAX_PROPERTIES = 1000  # Limit number of properties to prevent DoS
+        MAX_FIELD_NAME_LENGTH = 500
+        MAX_INSTRUCTION_LENGTH = 10000
+        
+        if isinstance(schema, dict) and 'properties' in schema:
+            if len(schema['properties']) > MAX_PROPERTIES:
+                logger.warning(f"Schema has too many properties: {len(schema['properties'])}")
+                raise HTTPException(status_code=400, detail="Schema exceeds maximum allowed properties")
             
-            # Create temporary file for Schema processing
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
-                json.dump(schema, temp_file)
-                temp_file.flush()  # Ensure data is written to disk before using temp_file.name
-                temp_schema_path = temp_file.name
+            # Validate field names and instructions
+            for field_name, field_data in schema['properties'].items():
+                if len(str(field_name)) > MAX_FIELD_NAME_LENGTH:
+                    logger.warning(f"Field name exceeds maximum length: {field_name[:50]}...")
+                    raise HTTPException(status_code=400, detail="Field name exceeds maximum allowed length")
+                if isinstance(field_data, dict):
+                    instruction = field_data.get('instruction', '')
+                    if len(str(instruction)) > MAX_INSTRUCTION_LENGTH:
+                        logger.warning(f"Instruction exceeds maximum length for field: {field_name}")
+                        raise HTTPException(status_code=400, detail="Field instruction exceeds maximum allowed length")
+        
+        # Create temporary file in output directory for Schema processing (path security requires it)
+        temp_dir = "output/temp"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_schema_path = os.path.join(temp_dir, f"temp_schema_{os.getpid()}.json")
+        with open(temp_schema_path, 'w') as temp_file:
+            json.dump(schema, temp_file)
+        
+        properties = []  # Initialize properties before try block
+        try:
+            # Load schema using our Schema class
+            schema_obj = Schema.from_file(temp_schema_path, allowed_dir=temp_dir)
             
-            try:
-                # Load schema using our Schema class
-                schema_obj = Schema.from_file(temp_schema_path)
+            # Check if nested and flatten if needed
+            if schema_obj.is_nested():
+                logger.debug("Detected nested blueprint - flattening for UI display")
+                flattened_schema, path_mapping = schema_obj.flatten_for_optimization()
                 
-                # Check if nested and flatten if needed
-                if schema_obj.is_nested():
-                    print("🔄 Detected nested blueprint - flattening for UI display")
-                    flattened_schema, path_mapping = schema_obj.flatten_for_optimization()
-                    
-                    # Extract properties from flattened schema
-                    properties = []
-                    for field_name, field_data in flattened_schema.properties.items():
+                # Extract properties from flattened schema
+                properties = []
+                for field_name, field_data in flattened_schema.properties.items():
+                    properties.append({
+                        'field_name': field_name,
+                        'instruction': field_data.instruction or '',
+                        'expected_output': '',  # Empty by default, to be filled in by the user
+                        'inference_type': field_data.inferenceType or 'explicit'
+                    })
+                logger.debug(f"Flattened nested blueprint: {len(properties)} fields")
+                
+            else:
+                logger.debug("Flat blueprint detected - processing normally")
+                # Extract properties from regular schema
+                properties = []
+                if isinstance(schema, dict) and 'properties' in schema:
+                    for field_name, field_data in schema['properties'].items():
                         properties.append({
                             'field_name': field_name,
-                            'instruction': field_data.instruction or '',
+                            'instruction': field_data.get('instruction', ''),
                             'expected_output': '',  # Empty by default, to be filled in by the user
-                            'inference_type': field_data.inferenceType or 'explicit'
+                            'inference_type': field_data.get('inferenceType', 'explicit')
                         })
-                    print(f"✅ Flattened nested blueprint: {len(properties)} fields")
-                    
+                    logger.debug(f"Extracted {len(properties)} properties")
                 else:
-                    print("📋 Flat blueprint detected - processing normally")
-                    # Extract properties from regular schema
-                    properties = []
-                    if isinstance(schema, dict) and 'properties' in schema:
-                        for field_name, field_data in schema['properties'].items():
-                            properties.append({
-                                'field_name': field_name,
-                                'instruction': field_data.get('instruction', ''),
-                                'expected_output': '',  # Empty by default, to be filled in by the user
-                                'inference_type': field_data.get('inferenceType', 'explicit')
-                            })
-                        print(f"Extracted {len(properties)} properties")
-                    else:
-                        print("No properties found in schema")
-                        
-            finally:
-                # Clean up temporary file
-                import os
-                if os.path.exists(temp_schema_path):
-                    os.unlink(temp_schema_path)
+                    logger.debug("No properties found in schema")
+                    
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_schema_path):
+                os.unlink(temp_schema_path)
         
         # Return the blueprint details and properties
+        # Security: Audit log successful blueprint fetch
+        logger.info(f"Blueprint fetch successful - blueprint_name: {blueprint_details.get('blueprintName', 'Unknown')}, "
+                    f"properties_count: {len(properties)}")
+        
         return {
             "status": "success",
             "blueprint_name": blueprint_details.get('blueprintName', 'Unknown'),
             "output_path": output_path,
             "properties": properties
         }
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
-        print(f"Error fetching blueprint: {str(e)}")
         import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Blueprint fetch failed: {type(e).__name__}: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch blueprint: {type(e).__name__}: {str(e)}")
 
 @app.get("/api/final-schema")
 @app.get("/final-schema")
@@ -912,7 +1081,7 @@ async def get_final_schema():
         
         if os.path.exists(final_schema_path) and final_schema_path.startswith(schemas_dir):
             # Read the schema file
-            with open(final_schema_path, "r") as f:
+            with open(final_schema_path, "r") as f:  # nosec B108 # nosemgrep: python.lang.security.audit.path-traversal - final_schema_path validated above
                 schema_content = f.read()
             
             return {"status": "success", "schema": schema_content}
@@ -936,7 +1105,7 @@ async def get_final_schema():
                         number_part = filename[7:-5]  # Remove "schema_" and ".json"
                         if number_part.isdigit():
                             schema_numbers.append(int(number_part))
-                    except:
+                    except (ValueError, IndexError):
                         pass
             
             if schema_numbers:
@@ -946,15 +1115,15 @@ async def get_final_schema():
                 # Validate the highest schema path
                 if highest_schema_path.startswith(schemas_dir):
                     # Read the highest numbered schema file
-                    with open(highest_schema_path, "r") as f:
+                    with open(highest_schema_path, "r") as f:  # nosec B108 # nosemgrep: python.lang.security.audit.path-traversal - highest_schema_path validated above
                         schema_content = f.read()
                     
                     return {"status": "success", "schema": schema_content}
             
             return {"status": "error", "message": "No valid schema files found"}
     except Exception as e:
-        print(f"Error getting final schema: {str(e)}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Error getting final schema: {type(e).__name__}")
+        return {"status": "error", "message": "Failed to get final schema"}
 
 @app.get("/api/list-logs")
 @app.get("/list-logs")

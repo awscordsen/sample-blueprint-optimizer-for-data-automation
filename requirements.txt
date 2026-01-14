@@ -17,4 +17,3 @@ python-multipart>=0.0.9
 aiofiles>=23.2.1
 psutil>=5.9.0
 sse_starlette
-python-cors  # For CORS support

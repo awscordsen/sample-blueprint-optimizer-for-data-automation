@@ -343,7 +343,7 @@ export default function ConfigurationForm() {
             <FormField label="Model">
               <Select
                 selectedOption={{ label: state.settings.model, value: state.settings.model }}
-                onChange={({ detail }) => handleSettingsChange('model', detail.selectedOption.value)}
+                onChange={({ detail }) => handleSettingsChange('model', detail.selectedOption?.value || '')}
                 options={[
                   { label: 'Anthropic', options: [
                     { label: 'Claude 3 Sonnet', value: 'anthropic.claude-3-sonnet-20240229-v1:0' },

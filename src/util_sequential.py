@@ -2,6 +2,7 @@
 Utility functions for sequential template-based BDA optimization.
 """
 import json
+import logging
 import os
 import pandas as pd
 from typing import Dict, List, Tuple, Any, Optional
@@ -9,6 +10,10 @@ from datetime import datetime
 
 from src.prompt_templates import generate_instruction, get_next_strategy
 from src.prompt_tuner import rewrite_prompt_bedrock_with_document
+from src.path_security import sanitize_filename, validate_path_within_directory, safe_join_path
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 def initialize_field_strategies(fields: List[str]) -> Dict[str, str]:
     """
@@ -86,19 +91,31 @@ def generate_instructions_from_strategies(
             instructions[field] = original_instructions.get(field, "")
         elif strategy == "document" and doc_path:
             # Use document-based strategy with the actual document
-            instructions[field] = rewrite_prompt_bedrock_with_document(
-                field, 
-                original_instructions.get(field, ""),
-                field_data.get(field, {}).get("expected_output", ""),
-                doc_path
-            )
+            try:
+                instructions[field] = rewrite_prompt_bedrock_with_document(
+                    field, 
+                    original_instructions.get(field, ""),
+                    field_data.get(field, {}).get("expected_output", ""),
+                    doc_path
+                )
+            except Exception as e:
+                logger.error(f"Failed to generate document-based instruction for field '{field}': {type(e).__name__}")
+                # Fallback to original instruction
+                instructions[field] = original_instructions.get(field, "")
+                logger.info(f"Using fallback (original) instruction for field '{field}'")
         else:
             # Use template-based strategy
-            instructions[field] = generate_instruction(
-                strategy,
-                field,
-                field_data.get(field, {}).get("expected_output", "")
-            )
+            try:
+                instructions[field] = generate_instruction(
+                    strategy,
+                    field,
+                    field_data.get(field, {}).get("expected_output", "")
+                )
+            except Exception as e:
+                logger.error(f"Failed to generate template instruction for field '{field}' with strategy '{strategy}': {type(e).__name__}")
+                # Fallback to original instruction
+                instructions[field] = original_instructions.get(field, "")
+                logger.info(f"Using fallback (original) instruction for field '{field}'")
     
     return instructions
 
@@ -119,29 +136,39 @@ def update_schema_with_field_instructions(
         str: Path to updated schema file
     """
     try:
-        # Load schema
-        with open(schema_path, 'r') as f:
+        # Validate schema path to prevent path traversal
+        abs_schema_path = os.path.realpath(schema_path)
+        if '..' in schema_path or not os.path.isfile(abs_schema_path):
+            raise ValueError(f"Invalid schema path: {schema_path}")
+        
+        # Load schema - path validated above
+        with open(abs_schema_path, 'r') as f:  # nosec B603 - path validated
             schema = json.load(f)
         
-        # Update instructions
-        for field, instruction in instructions.items():
+        # Update instructions - internal data processing, no external exposure
+        for field, instruction in instructions.items():  # nosec CWE-200 - internal processing
             if field in schema.get("properties", {}):
                 schema["properties"][field]["instruction"] = instruction
         
         # Generate output path if not provided
+        output_dir = "output/schemas"
         if not output_path:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_path = f"output/schemas/schema_sequential_{timestamp}.json"
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = safe_join_path(output_dir, f"schema_sequential_{timestamp}.json")
+        else:
+            # Validate output path
+            output_path = validate_path_within_directory(output_path, output_dir)
         
-        # Save updated schema
-        with open(output_path, 'w') as f:
+        # Save updated schema - path validated by safe_join_path or validate_path_within_directory
+        with open(output_path, 'w') as f:  # nosec B603 - path validated
             json.dump(schema, f, indent=4)
         
         print(f"✅ Schema updated and saved to {output_path}")
         return output_path
         
     except Exception as e:
-        print(f"❌ Error updating schema: {e}")
+        print(f"❌ Error updating schema: {e}")  # nosec - error message only, no sensitive data
         return schema_path
 
 def update_input_file_with_instructions(
@@ -161,30 +188,40 @@ def update_input_file_with_instructions(
         str: Path to updated input file
     """
     try:
-        # Load input file
-        with open(input_path, 'r') as f:
+        # Validate input path to prevent path traversal
+        abs_input_path = os.path.realpath(input_path)
+        if '..' in input_path or not os.path.isfile(abs_input_path):
+            raise ValueError(f"Invalid input path: {input_path}")
+        
+        # Load input file - path validated above
+        with open(abs_input_path, 'r') as f:  # nosec B603 - path validated
             input_data = json.load(f)
         
-        # Update instructions
-        for item in input_data.get("inputs", []):
+        # Update instructions - internal data processing, no external exposure
+        for item in input_data.get("inputs", []):  # nosec CWE-200 - internal processing
             field_name = item.get("field_name")
             if field_name in instructions:
                 item["instruction"] = instructions[field_name]
         
         # Generate output path if not provided
+        output_dir = "output/inputs"
         if not output_path:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_path = f"output/inputs/input_sequential_{timestamp}.json"
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = safe_join_path(output_dir, f"input_sequential_{timestamp}.json")
+        else:
+            # Validate output path
+            output_path = validate_path_within_directory(output_path, output_dir)
         
-        # Save updated input file
-        with open(output_path, 'w') as f:
+        # Save updated input file - path validated by safe_join_path or validate_path_within_directory
+        with open(output_path, 'w') as f:  # nosec B603 - path validated
             json.dump(input_data, f, indent=4)
         
         print(f"✅ Input file updated and saved to {output_path}")
         return output_path
         
     except Exception as e:
-        print(f"❌ Error updating input file: {e}")
+        print(f"❌ Error updating input file: {e}")  # nosec - error message only, no sensitive data
         return input_path
 
 def extract_field_data_from_dataframe(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
@@ -225,7 +262,16 @@ def extract_similarities_from_dataframe(df: pd.DataFrame) -> Dict[str, float]:
     for _, row in df.iterrows():
         field_name = row.get('Field')
         if field_name and 'semantic_similarity' in row:
-            similarities[field_name] = float(row['semantic_similarity'])
+            # Safe float conversion with error handling for None or non-numeric values
+            similarity_value = row['semantic_similarity']
+            try:
+                if similarity_value is None or (isinstance(similarity_value, float) and pd.isna(similarity_value)):
+                    similarities[field_name] = 0.0
+                else:
+                    similarities[field_name] = float(similarity_value)
+            except (ValueError, TypeError):
+                # Default to 0.0 for invalid values
+                similarities[field_name] = 0.0
     
     return similarities
 

@@ -211,7 +211,7 @@ The application now includes a built-in document upload feature:
 - **Set S3 Prefix**: Optionally specify a folder path (e.g., `documents/input/`)
 - **Bucket Validation**: Automatic validation of read/write permissions
 - **File Upload**: Drag and drop or select files up to 100MB
-- **Supported Formats**: PDF, DOC, DOCX, TXT, PNG, JPG, JPEG, TIFF
+- **Supported Formats**: PDF only (other formats may be added in future releases)
 - **Auto-Configuration**: Uploaded document S3 URI is automatically set in configuration
 
 ### 3. Fetch Blueprint
@@ -323,7 +323,7 @@ bda-blueprint-optimizer/
 - Verify S3 bucket exists and is accessible
 - Check IAM permissions for S3 operations (GetObject, PutObject, ListBucket)
 - Ensure file size is under 100MB limit
-- Verify supported file formats: PDF, DOC, DOCX, TXT, PNG, JPG, JPEG, TIFF
+- Verify file format is PDF (only PDF is currently supported)
 
 **S3 Access Validation Fails**
 - Check bucket permissions and policies
@@ -342,6 +342,7 @@ bda-blueprint-optimizer/
 - Review `output/schemas/` for generated schema files
 
 ### Security Considerations
+- **Note**: This code is not intended for production use
 - **File Path Validation**: All file operations are restricted to project subdirectories
 - **S3 Access Control**: Bucket validation ensures proper read/write permissions
 - **Input Sanitization**: File names and paths are validated to prevent directory traversal
