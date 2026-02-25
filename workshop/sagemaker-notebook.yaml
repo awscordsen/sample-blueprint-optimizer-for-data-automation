@@ -112,12 +112,16 @@ Resources:
               #!/bin/bash
               set -e
               cd /home/ec2-user/SageMaker
-              aws s3 cp s3://${DataBucket}/notebook-files/ . --recursive --region ${AWS::Region}
+              git clone --depth 1 --filter=blob:none --sparse https://github.com/awscordsen/sample-blueprint-optimizer-for-data-automation.git tmp_repo
+              cd tmp_repo
+              git sparse-checkout set workshop
+              cp -r workshop/src/* /home/ec2-user/SageMaker/
+              cp -r workshop/samples/* /home/ec2-user/SageMaker/samples/
+              cd ..
+              rm -rf tmp_repo
               chown -R ec2-user:ec2-user /home/ec2-user/SageMaker
 
-              # Write CFN bucket name to env so notebooks can read it
-              echo "export BDA_BUCKET=${DataBucket}" >> /home/ec2-user/.bashrc
-              echo "export BDA_BUCKET=${DataBucket}" | tee /etc/profile.d/bda_env.sh
+              echo "export BDA_BUCKET=${DataBucket}" >> /home/ec2-user/.ipython/profile_default/startup/00-startup.py
               initctl restart jupyter-server --no-wait || true
 
   NotebookInstance:
