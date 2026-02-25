@@ -1,0 +1,44 @@
+{
+  "po_number": "PO-2026-0224-1265",
+  "retailer_name": "Bike World",
+  "order_date": "2026-02-24",
+  "order_total": 11571.25,
+  "customer_name": "Helen Davis",
+  "special_requests": "",
+  "order_items": [
+    {
+      "sku": "AB-MB-076",
+      "product_name": "Trail Classic",
+      "description": "Trail Classic",
+      "quantity": 6,
+      "unit_price": 1864.37,
+      "line_total": 11186.22,
+      "option_color": "or8901",
+      "option_size": "S",
+      "option_weight": "15.6 lbs",
+      "option_battery": "",
+      "option_range": "",
+      "option_speed": "",
+      "option_wheel_size": "",
+      "option_brake_type": "",
+      "option_certification": ""
+    },
+    {
+      "sku": "AB-FR-012",
+      "product_name": "Durable Chassis",
+      "description": "Durable Chassis",
+      "quantity": 1,
+      "unit_price": 385.03,
+      "line_total": 385.03,
+      "option_color": "wh9001",
+      "option_size": "L",
+      "option_weight": "23.3 lbs",
+      "option_battery": "",
+      "option_range": "",
+      "option_speed": "",
+      "option_wheel_size": "",
+      "option_brake_type": "",
+      "option_certification": ""
+    }
+  ]
+}

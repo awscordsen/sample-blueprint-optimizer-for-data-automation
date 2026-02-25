@@ -1,0 +1,44 @@
+{
+  "po_number": "PO-2026-0224-0524",
+  "retailer_name": "Mountain Gear Co",
+  "order_date": "2026-02-24",
+  "order_total": 9745.53,
+  "customer_name": "John Hall",
+  "special_requests": "",
+  "order_items": [
+    {
+      "sku": "AB-EB-017",
+      "product_name": "E-Ride Master",
+      "description": "E-Ride Master",
+      "quantity": 5,
+      "unit_price": 1860.69,
+      "line_total": 9303.45,
+      "option_color": "cb8901",
+      "option_size": "S",
+      "option_weight": "19.4 lbs",
+      "option_battery": "48V 17.5Ah",
+      "option_range": "41 miles",
+      "option_speed": "",
+      "option_wheel_size": "",
+      "option_brake_type": "",
+      "option_certification": ""
+    },
+    {
+      "sku": "AB-KB-033",
+      "product_name": "Small Classic",
+      "description": "Small Classic",
+      "quantity": 2,
+      "unit_price": 221.04,
+      "line_total": 442.08,
+      "option_color": "ol4567",
+      "option_size": "",
+      "option_weight": "",
+      "option_battery": "",
+      "option_range": "",
+      "option_speed": "",
+      "option_wheel_size": "",
+      "option_brake_type": "",
+      "option_certification": ""
+    }
+  ]
+}
