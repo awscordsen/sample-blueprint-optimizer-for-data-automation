@@ -22,28 +22,10 @@ This workshop covers the Bedrock Data Automation Blueprint Optimization API:
 - Ensure you have access to Amazon Bedrock Data Automation in your region
 
 ### 2. AWS CLI Setup
-Install and configure the AWS CLI:
+- Install and configure the [AWS CLI](https://aws.amazon.com/cli/)
+- Configure your credentials with `aws configure`
 
-```bash
-# Install AWS CLI (macOS)
-brew install awscli
-
-# Install AWS CLI (Linux)
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
-sudo ./aws/install
-
-# Configure credentials
-aws configure
-```
-
-When prompted, enter:
-- AWS Access Key ID
-- AWS Secret Access Key
-- Default region (e.g., `us-east-1`)
-- Default output format (e.g., `json`)
-
-### 3. Python Environment
+### 3. Python Environment (for local testing)
 - Python 3.8 or later
 - pip package manager
 
