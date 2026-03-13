@@ -77,7 +77,9 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                   - s3:DeleteObject
+                  - s3:DeleteObjectVersion
                   - s3:ListBucket
+                  - s3:ListBucketVersions
                 Resource:
                   - !GetAtt DataBucket.Arn
                   - !Sub ${DataBucket.Arn}/*
@@ -110,19 +112,23 @@ Resources:
         - Content:
             Fn::Base64: !Sub |
               #!/bin/bash
-              set -e
-              cd /home/ec2-user/SageMaker
-              git clone --depth 1 --filter=blob:none --sparse https://github.com/awscordsen/sample-blueprint-optimizer-for-data-automation.git tmp_repo
-              cd tmp_repo
-              git sparse-checkout set workshop
-              cp -r workshop/src/* /home/ec2-user/SageMaker/
-              cp -r workshop/samples/* /home/ec2-user/SageMaker/samples/
-              cd ..
-              rm -rf tmp_repo
+              # Download workshop files from S3 (uploaded by deploy.sh after stack creation).
+              # Failures are non-fatal so the notebook starts successfully even if files
+              # aren't in S3 yet. deploy.sh restarts the notebook after uploading.
+              mkdir -p /home/ec2-user/SageMaker/sample_data/purchase_order
+
+              aws s3 cp "s3://${DataBucket}/workshop/src/" /home/ec2-user/SageMaker/ \
+                --recursive --quiet 2>/dev/null || true
+              aws s3 cp "s3://${DataBucket}/workshop/samples/" /home/ec2-user/SageMaker/sample_data/ \
+                --recursive --quiet 2>/dev/null || true
+
               chown -R ec2-user:ec2-user /home/ec2-user/SageMaker
 
-              echo "export BDA_BUCKET=${DataBucket}" >> /home/ec2-user/.ipython/profile_default/startup/00-startup.py
-              initctl restart jupyter-server --no-wait || true
+              # Expose BDA_BUCKET to Jupyter kernels via IPython startup script
+              mkdir -p /home/ec2-user/.ipython/profile_default/startup
+              echo "import os; os.environ.setdefault('BDA_BUCKET', '${DataBucket}')" \
+                > /home/ec2-user/.ipython/profile_default/startup/00-env.py
+              chown -R ec2-user:ec2-user /home/ec2-user/.ipython
 
   NotebookInstance:
     Type: AWS::SageMaker::NotebookInstance
