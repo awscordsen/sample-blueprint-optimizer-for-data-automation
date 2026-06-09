@@ -1,0 +1,127 @@
+{
+	"$schema": "http://json-schema.org/draft-07/schema#",
+	"description": "A purchase order document from Cycle City to a customer",
+	"class": "Purchase Order",
+	"type": "object",
+	"definitions": {
+		"OrderItem": {
+			"type": "object",
+			"properties": {
+				"sku": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The stock keeping unit of the item"
+				},
+				"product_name": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The name of the product"
+				},
+				"description": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "A detailed description of the product"
+				},
+				"quantity": {
+					"type": "number",
+					"inferenceType": "explicit",
+					"instruction": "The quantity of the product ordered"
+				},
+				"unit_price": {
+					"type": "number",
+					"inferenceType": "explicit",
+					"instruction": "The unit price of the product"
+				},
+				"line_total": {
+					"type": "number",
+					"inferenceType": "explicit",
+					"instruction": "The total price for the line item"
+				},
+				"option_color": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The color option of the product"
+				},
+				"option_size": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The size option of the product"
+				},
+				"option_weight": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The weight option of the product"
+				},
+				"option_battery": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The battery option of the product"
+				},
+				"option_range": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The range option of the product"
+				},
+				"option_speed": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The speed option of the product"
+				},
+				"option_wheel_size": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The wheel size option of the product"
+				},
+				"option_brake_type": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The brake type option of the product"
+				},
+				"option_certification": {
+					"type": "string",
+					"inferenceType": "explicit",
+					"instruction": "The certification option of the product"
+				}
+			}
+		}
+	},
+	"properties": {
+		"po_number": {
+			"type": "string",
+			"inferenceType": "explicit",
+			"instruction": "The unique identifier for the purchase order"
+		},
+		"retailer_name": {
+			"type": "string",
+			"inferenceType": "explicit",
+			"instruction": "The name of the retailer"
+		},
+		"order_date": {
+			"type": "string",
+			"inferenceType": "explicit",
+			"instruction": "The date when the order was placed"
+		},
+		"order_total": {
+			"type": "number",
+			"inferenceType": "explicit",
+			"instruction": "The total amount for the order"
+		},
+		"customer_name": {
+			"type": "string",
+			"inferenceType": "inferred",
+			"instruction": "The name of the customer"
+		},
+		"special_requests": {
+			"type": "string",
+			"inferenceType": "inferred",
+			"instruction": "Any special requests or notes included in the order"
+		},
+		"order_items": {
+			"type": "array",
+			"instruction": "A list of all items ordered",
+			"items": {
+				"$ref": "#/definitions/OrderItem"
+			}
+		}
+	}
+}

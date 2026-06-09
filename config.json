@@ -1,0 +1,14 @@
+{
+  "region": "us-east-1",
+  "s3_folder": "",
+  "data_automation_profile_arn": "arn:aws:bedrock:${region}:${accountId}:data-automation-profile/us.data-automation-v1",
+  "blueprint_name": "",
+  "blueprint_type": "DOCUMENT",
+  "blueprint_stage": "DEVELOPMENT",
+  "blueprint_arn": "",
+  "blueprint_schema": {},
+  "kms_key_id": "",
+  "cloudwatch_logging_enabled": false,
+  "samples": [],
+  "tags": []
+}

@@ -1,0 +1,44 @@
+{
+  "po_number": "PO-2026-0224-6043",
+  "retailer_name": "Adventure Cycling",
+  "order_date": "2026-02-24",
+  "order_total": 13620.38,
+  "customer_name": "Sarah Mitchell",
+  "special_requests": "",
+  "order_items": [
+    {
+      "sku": "AB-MB-039",
+      "product_name": "Boulder Classic",
+      "description": "Boulder Classic",
+      "quantity": 2,
+      "unit_price": 2803.47,
+      "line_total": 5606.94,
+      "option_color": "gy6789",
+      "option_size": "XL",
+      "option_weight": "16.6 lbs",
+      "option_battery": "",
+      "option_range": "",
+      "option_speed": "",
+      "option_wheel_size": "",
+      "option_brake_type": "",
+      "option_certification": ""
+    },
+    {
+      "sku": "AB-RB-041",
+      "product_name": "Turbo Pro",
+      "description": "Turbo Pro",
+      "quantity": 4,
+      "unit_price": 2003.36,
+      "line_total": 8013.44,
+      "option_color": "ol4567",
+      "option_size": "L",
+      "option_weight": "27.9 lbs",
+      "option_battery": "",
+      "option_range": "",
+      "option_speed": "",
+      "option_wheel_size": "",
+      "option_brake_type": "",
+      "option_certification": ""
+    }
+  ]
+}
