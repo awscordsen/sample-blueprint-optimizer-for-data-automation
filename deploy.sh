@@ -39,8 +39,8 @@ NOTEBOOK_NAME=$(basename "$NOTEBOOK_ARN")
 
 # Upload workshop files to S3 so the lifecycle config can download them
 echo "Uploading workshop files to s3://$BUCKET/workshop/..."
-aws s3 cp src/      "s3://$BUCKET/workshop/src/"      --recursive --quiet
-aws s3 cp samples/  "s3://$BUCKET/workshop/samples/"  --recursive --quiet
+aws s3 cp purchase-order-optimization-workshop.ipynb "s3://$BUCKET/workshop/src/purchase-order-optimization-workshop.ipynb" --quiet
+aws s3 cp sample_data/purchase_order/ "s3://$BUCKET/workshop/samples/purchase_order/" --recursive --quiet
 echo "Upload complete."
 
 # Restart the notebook so the lifecycle config re-runs and picks up the S3 files
